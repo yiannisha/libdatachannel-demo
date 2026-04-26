@@ -45,5 +45,9 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(libdatachannel)
 
-add_executable(libdatachannel_demo src/main.cpp)
+add_executable(
+  libdatachannel_demo
+  src/InMemorySignaler.cpp
+  src/main.cpp
+)
 target_link_libraries(libdatachannel_demo PRIVATE LibDataChannel::LibDataChannel)

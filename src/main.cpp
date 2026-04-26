@@ -1,3 +1,5 @@
+#include "InMemorySignaler.hpp"
+#include "Signaler.hpp"
 #include "rtc/rtc.hpp"
 
 #include <chrono>
@@ -7,63 +9,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <utility>
 #include <variant>
-#include <vector>
 
 namespace {
-
-struct PendingCandidate {
-  std::string candidate;
-  std::string mid;
-};
-
-class InMemorySignaler {
- public:
-  explicit InMemorySignaler(std::shared_ptr<rtc::PeerConnection> target)
-      : target_(std::move(target)) {}
-
-  void deliverDescription(const rtc::Description& description) {
-    target_->setRemoteDescription(rtc::Description(std::string(description)));
-
-    std::vector<PendingCandidate> pending;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      remote_description_set_ = true;
-      pending.swap(pending_candidates_);
-    }
-
-    for (const auto& candidate : pending) {
-      target_->addRemoteCandidate(rtc::Candidate(candidate.candidate, candidate.mid));
-    }
-  }
-
-  void deliverCandidate(const rtc::Candidate& candidate) {
-    if (candidate.candidate().empty()) {
-      return;
-    }
-
-    bool queue_candidate = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!remote_description_set_) {
-        pending_candidates_.push_back(
-            PendingCandidate{candidate.candidate(), candidate.mid()});
-        queue_candidate = true;
-      }
-    }
-
-    if (!queue_candidate) {
-      target_->addRemoteCandidate(rtc::Candidate(candidate.candidate(), candidate.mid()));
-    }
-  }
-
- private:
-  std::shared_ptr<rtc::PeerConnection> target_;
-  std::mutex mutex_;
-  bool remote_description_set_ = false;
-  std::vector<PendingCandidate> pending_candidates_;
-};
 
 struct DemoState {
   std::mutex mutex;
@@ -109,17 +57,25 @@ void attachChannelHandlers(const std::string& peer_name,
 
 int main() {
   using namespace std::chrono_literals;
+  using demo::InMemorySignaler;
+  using demo::Signaler;
 
-  rtc::InitLogger(rtc::LogLevel::Debug);
+  // initialize libdatachannel logging
+  rtc::InitLogger(rtc::LogLevel::Warning);
 
   rtc::Configuration config;
 
+  // create two peer connections and an in-memory signaler to exchange messages between them
   auto offerer = std::make_shared<rtc::PeerConnection>(config);
   auto answerer = std::make_shared<rtc::PeerConnection>(config);
 
   InMemorySignaler to_offerer(offerer);
   InMemorySignaler to_answerer(answerer);
   DemoState state;
+
+  // ----------
+
+  // ---------- REGISTER CALLBACKS ----------
 
   offerer->onStateChange([](rtc::PeerConnection::State current) {
     std::cout << "offerer state: " << current << '\n';
@@ -151,6 +107,9 @@ int main() {
     to_offerer.deliverCandidate(candidate);
   });
 
+  // ----------
+
+  // create a DataChannel on the answerer and attach channel handlers to it
   std::shared_ptr<rtc::DataChannel> answerer_channel;
   answerer->onDataChannel([&](const std::shared_ptr<rtc::DataChannel>& channel) {
     answerer_channel = channel;
@@ -158,9 +117,11 @@ int main() {
     attachChannelHandlers("answerer", answerer_channel, "hello from answerer", state);
   });
 
+  // create a DataChannel on the offerer and attach channel handlers to it
   auto offerer_channel = offerer->createDataChannel("demo");
   attachChannelHandlers("offerer", offerer_channel, "hello from offerer", state);
 
+  // wait for both channels to receive their greeting message, or time out after 15 seconds
   std::unique_lock<std::mutex> lock(state.mutex);
   const bool completed = state.cv.wait_for(lock, 15s, [&state]() {
     return state.messages_received >= 2;
