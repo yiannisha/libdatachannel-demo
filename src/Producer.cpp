@@ -36,6 +36,7 @@ Producer::Producer(uint16_t websocket_port, std::string bind_address)
         config.bindAddress = std::move(bind_address);
         return config;
       }()) {
+  video_pipeline_.start();
   setupPeerConnection();
   setupWebSocketServer();
 }

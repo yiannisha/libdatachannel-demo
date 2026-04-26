@@ -1,5 +1,6 @@
 #pragma once
 
+#include "VideoPipeline.hpp"
 #include "rtc/rtc.hpp"
 
 #include <memory>
@@ -29,6 +30,7 @@ class Producer {
 
   rtc::PeerConnection peer_connection_;
   rtc::WebSocketServer server_;
+  VideoPipeline video_pipeline_;
 
   std::shared_ptr<rtc::WebSocket> client_;
   std::shared_ptr<rtc::DataChannel> data_channel_;

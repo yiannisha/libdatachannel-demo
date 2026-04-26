@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(PkgConfig REQUIRED)
 include(FetchContent)
 
 if(APPLE AND NOT DEFINED OPENSSL_ROOT_DIR)
@@ -53,6 +54,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(libdatachannel)
 FetchContent_MakeAvailable(nlohmann_json)
 
+pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
+
 add_executable(
   libdatachannel_demo
   src/InMemorySignaler.cpp
@@ -65,12 +68,14 @@ add_library(
   src/Consumer.cpp
   src/Producer.cpp
   src/SignalingProtocol.cpp
+  src/VideoPipeline.cpp
 )
 target_link_libraries(
   p2p_demo_common
   PUBLIC
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
+    PkgConfig::GSTREAMER
 )
 target_include_directories(p2p_demo_common PUBLIC src)
 
