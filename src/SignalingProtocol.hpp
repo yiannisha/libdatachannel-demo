@@ -15,6 +15,8 @@ enum class SignalingCommand {
 struct SignalingMessage {
   SignalingCommand command;
   std::string description;
+  std::string type;
+  std::string mid;
 };
 
 std::string serializeSignalingMessage(const SignalingMessage& message);

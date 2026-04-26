@@ -49,11 +49,20 @@ rtc::Description::Type inferRemoteDescriptionType(
 }  // namespace
 
 std::string serializeSignalingMessage(const SignalingMessage& message) {
-  return json{
+  json payload = {
       {"command", commandToString(message.command)},
       {"description", message.description},
+  };
+
+  if (!message.type.empty()) {
+    payload["type"] = message.type;
   }
-      .dump();
+
+  if (!message.mid.empty()) {
+    payload["mid"] = message.mid;
+  }
+
+  return payload.dump();
 }
 
 SignalingMessage parseSignalingMessage(std::string_view payload) {
@@ -70,6 +79,12 @@ SignalingMessage parseSignalingMessage(std::string_view payload) {
   return SignalingMessage{
       commandFromString(parsed.at("command").get<std::string>()),
       parsed.at("description").get<std::string>(),
+      parsed.contains("type") && parsed.at("type").is_string()
+          ? parsed.at("type").get<std::string>()
+          : "",
+      parsed.contains("mid") && parsed.at("mid").is_string()
+          ? parsed.at("mid").get<std::string>()
+          : "",
   };
 }
 
@@ -77,6 +92,8 @@ SignalingMessage makeLocalDescriptionMessage(const rtc::Description& description
   return SignalingMessage{
       SignalingCommand::LocalDescription,
       std::string(description),
+      description.typeString(),
+      "",
   };
 }
 
@@ -84,6 +101,8 @@ SignalingMessage makeLocalCandidateMessage(const rtc::Candidate& candidate) {
   return SignalingMessage{
       SignalingCommand::LocalCandidate,
       std::string(candidate),
+      "",
+      candidate.mid(),
   };
 }
 
@@ -94,12 +113,20 @@ rtc::Description parseRemoteDescription(
     throw std::invalid_argument("Expected a localDescription signaling message");
   }
 
+  if (!message.type.empty()) {
+    return rtc::Description(message.description, message.type);
+  }
+
   return rtc::Description(message.description, inferRemoteDescriptionType(signaling_state));
 }
 
 rtc::Candidate parseRemoteCandidate(const SignalingMessage& message) {
   if (message.command != SignalingCommand::LocalCandidate) {
     throw std::invalid_argument("Expected a localCandidate signaling message");
+  }
+
+  if (!message.mid.empty()) {
+    return rtc::Candidate(message.description, message.mid);
   }
 
   return rtc::Candidate(message.description);

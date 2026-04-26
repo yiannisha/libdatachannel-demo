@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>libdatachannel Browser Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1418;
+      --panel: #162027;
+      --panel-2: #1d2a33;
+      --text: #e7f1f6;
+      --muted: #9eb2bf;
+      --accent: #59d4a0;
+      --danger: #ff7a7a;
+      --border: #2d3c46;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background:
+        radial-gradient(circle at top left, rgba(89, 212, 160, 0.14), transparent 28%),
+        linear-gradient(180deg, #0f1418, #0b1014);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+
+    p {
+      margin: 0 0 18px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .controls, .panel {
+      background: rgba(22, 32, 39, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      backdrop-filter: blur(10px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 12px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 16px;
+      font: inherit;
+      cursor: pointer;
+      background: var(--accent);
+      color: #072116;
+      font-weight: 700;
+    }
+
+    button.secondary {
+      background: #31414c;
+      color: var(--text);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+      gap: 18px;
+    }
+
+    video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 12px;
+      display: block;
+    }
+
+    .status {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #23313a;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .pill.good { color: var(--accent); }
+    .pill.bad { color: var(--danger); }
+
+    pre {
+      margin: 0;
+      max-height: 480px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #cfe0e8;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 900px) {
+      .controls, .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>libdatachannel Browser Viewer</h1>
+    <p>Connects directly to the producer's WebSocket signaling server, receives the remote WebRTC video track, and renders it in the browser.</p>
+
+    <div class="controls">
+      <div>
+        <label for="ws-url">Producer WebSocket URL</label>
+        <input id="ws-url" value="ws://127.0.0.1:8080/" spellcheck="false">
+      </div>
+      <button id="connect">Connect</button>
+      <button id="disconnect" class="secondary">Disconnect</button>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <video id="remote-video" autoplay playsinline controls muted></video>
+        <div class="status">
+          <span id="ws-state" class="pill">ws: idle</span>
+          <span id="pc-state" class="pill">pc: idle</span>
+          <span id="ice-state" class="pill">ice: idle</span>
+          <span id="track-state" class="pill">track: none</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <pre id="log"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const wsUrlInput = document.getElementById("ws-url");
+    const connectButton = document.getElementById("connect");
+    const disconnectButton = document.getElementById("disconnect");
+    const remoteVideo = document.getElementById("remote-video");
+    const logEl = document.getElementById("log");
+    const wsStateEl = document.getElementById("ws-state");
+    const pcStateEl = document.getElementById("pc-state");
+    const iceStateEl = document.getElementById("ice-state");
+    const trackStateEl = document.getElementById("track-state");
+
+    let ws = null;
+    let pc = null;
+    let remoteDescriptionSet = false;
+    let pendingRemoteCandidates = [];
+
+    function log(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      logEl.textContent += `[${timestamp}] ${message}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setPill(el, text, mode = "") {
+      el.textContent = text;
+      el.className = `pill ${mode}`.trim();
+    }
+
+    function cleanup() {
+      remoteDescriptionSet = false;
+      pendingRemoteCandidates = [];
+
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+        ws = null;
+      }
+
+      if (pc) {
+        pc.ontrack = null;
+        pc.onicecandidate = null;
+        pc.onconnectionstatechange = null;
+        pc.oniceconnectionstatechange = null;
+        pc.ondatachannel = null;
+        pc.close();
+        pc = null;
+      }
+
+      remoteVideo.srcObject = null;
+      setPill(wsStateEl, "ws: idle");
+      setPill(pcStateEl, "pc: idle");
+      setPill(iceStateEl, "ice: idle");
+      setPill(trackStateEl, "track: none");
+    }
+
+    async function handleRemoteCandidate(message) {
+      const candidateInit = {
+        candidate: message.description,
+        sdpMid: message.mid || null
+      };
+
+      if (!remoteDescriptionSet) {
+        pendingRemoteCandidates.push(candidateInit);
+        return;
+      }
+
+      await pc.addIceCandidate(candidateInit);
+    }
+
+    async function flushPendingRemoteCandidates() {
+      for (const candidate of pendingRemoteCandidates) {
+        await pc.addIceCandidate(candidate);
+      }
+      pendingRemoteCandidates = [];
+    }
+
+    function sendJson(payload) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        throw new Error("WebSocket is not open");
+      }
+      ws.send(JSON.stringify(payload));
+    }
+
+    async function connect() {
+      cleanup();
+
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        setPill(pcStateEl, `pc: ${state}`, state === "connected" ? "good" : state === "failed" ? "bad" : "");
+        log(`peer connection state -> ${state}`);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        setPill(iceStateEl, `ice: ${state}`, state === "connected" || state === "completed" ? "good" : state === "failed" ? "bad" : "");
+        log(`ice state -> ${state}`);
+      };
+
+      pc.ontrack = (event) => {
+        const [stream] = event.streams;
+        remoteVideo.srcObject = stream;
+        setPill(trackStateEl, `track: ${event.track.kind}`, "good");
+        log(`received remote track kind=${event.track.kind} id=${event.track.id}`);
+      };
+
+      pc.ondatachannel = (event) => {
+        const channel = event.channel;
+        log(`received data channel ${channel.label}`);
+        channel.onmessage = (messageEvent) => {
+          log(`data channel message: ${messageEvent.data}`);
+        };
+      };
+
+      pc.onicecandidate = (event) => {
+        if (!event.candidate) {
+          return;
+        }
+
+        sendJson({
+          command: "localCandidate",
+          description: event.candidate.candidate,
+          mid: event.candidate.sdpMid || ""
+        });
+      };
+
+      ws = new WebSocket(wsUrlInput.value);
+
+      ws.onopen = () => {
+        setPill(wsStateEl, "ws: open", "good");
+        log(`websocket connected to ${wsUrlInput.value}`);
+      };
+
+      ws.onclose = () => {
+        setPill(wsStateEl, "ws: closed");
+        log("websocket closed");
+      };
+
+      ws.onerror = () => {
+        setPill(wsStateEl, "ws: error", "bad");
+        log("websocket error");
+      };
+
+      ws.onmessage = async (event) => {
+        try {
+          const message = JSON.parse(event.data);
+
+          if (message.command === "localDescription") {
+            log(`received remote ${message.type || "description"}`);
+            await pc.setRemoteDescription({
+              type: message.type || "offer",
+              sdp: message.description
+            });
+            remoteDescriptionSet = true;
+            await flushPendingRemoteCandidates();
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            sendJson({
+              command: "localDescription",
+              description: answer.sdp,
+              type: answer.type
+            });
+          } else if (message.command === "localCandidate") {
+            await handleRemoteCandidate(message);
+          } else {
+            log(`ignored unsupported signaling command ${message.command}`);
+          }
+        } catch (error) {
+          console.error(error);
+          log(`signaling error: ${error.message}`);
+        }
+      };
+    }
+
+    connectButton.addEventListener("click", () => {
+      connect().catch((error) => {
+        console.error(error);
+        log(`connect failed: ${error.message}`);
+      });
+    });
+
+    disconnectButton.addEventListener("click", () => {
+      cleanup();
+      log("disconnected");
+    });
+
+    window.addEventListener("beforeunload", cleanup);
+  </script>
+</body>
+</html>

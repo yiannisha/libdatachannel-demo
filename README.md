@@ -39,6 +39,8 @@ The current video path is:
 
 - laptop camera -> GStreamer -> H.264 encode -> RTP packetize -> `appsink` -> `rtc::Track`
 
+There is also a minimal browser viewer in [browser-viewer/index.html](browser-viewer/index.html) that can connect directly to the producer's WebSocket signaling server and render the remote WebRTC video track in a browser.
+
 ## Signaling Protocol
 
 Both sides exchange JSON messages over WebSocket in this format:
@@ -46,9 +48,13 @@ Both sides exchange JSON messages over WebSocket in this format:
 ```json
 {
   "command": "localDescription" | "localCandidate",
-  "description": "string form of rtc::Description or rtc::Candidate"
+  "description": "string form of SDP or ICE candidate",
+  "type": "offer" | "answer",
+  "mid": "video" | "0" | "data"
 }
 ```
+
+`type` is used for SDP messages and `mid` is used for ICE candidate messages. The native code still accepts older messages without those fields, but the browser viewer uses them explicitly.
 
 Examples:
 
@@ -220,6 +226,39 @@ Example:
 ./scripts/run_consumer.sh ws://192.168.1.50:8080/
 ```
 
+### Browser Viewer
+
+You can also view the producer's WebRTC video directly in a browser:
+
+1. Start the producer.
+2. Open [browser-viewer/index.html](browser-viewer/index.html) in a browser, or serve the repo over HTTP:
+
+```bash
+python3 -m http.server 8000
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000/browser-viewer/
+```
+
+3. Enter the producer WebSocket URL, for example:
+
+```text
+ws://127.0.0.1:8080/
+```
+
+4. Click `Connect`.
+
+The page will:
+
+- receive the producer's SDP offer
+- create and send an SDP answer
+- exchange ICE candidates
+- attach the remote WebRTC video track to a `<video>` element
+- log the incoming data channel messages
+
 To visualize the RTP mirrored by the consumer on the same machine, run:
 
 ```bash
@@ -284,6 +323,7 @@ consumer received on data channel: third message from producer
 - [src/SignalingProtocol.hpp](src/SignalingProtocol.hpp) / [src/SignalingProtocol.cpp](src/SignalingProtocol.cpp): JSON signaling schema and parsing helpers
 - [src/producer_main.cpp](src/producer_main.cpp): producer executable entrypoint
 - [src/consumer_main.cpp](src/consumer_main.cpp): consumer executable entrypoint
+- [browser-viewer/index.html](browser-viewer/index.html): minimal browser-based WebRTC viewer
 - [src/main.cpp](src/main.cpp): original single-process demo
 
 ## Current Limitations
