@@ -2,10 +2,14 @@
 
 #include "SignalingProtocol.hpp"
 
+#include <arpa/inet.h>
 #include <chrono>
+#include <cstddef>
 #include <iostream>
 #include <stdexcept>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 
@@ -33,14 +37,37 @@ std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message)
 Consumer::Consumer(std::string websocket_url)
     : websocket_url_(std::move(websocket_url)),
       peer_connection_(makePeerConfiguration()) {
+  setupUdpProbe();
   setupPeerConnection();
   setupWebSocket();
+}
+
+Consumer::~Consumer() {
+  if (udp_probe_fd_ >= 0) {
+    close(udp_probe_fd_);
+  }
 }
 
 void Consumer::wait() const {
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+}
+
+void Consumer::setupUdpProbe() {
+  udp_probe_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp_probe_fd_ < 0) {
+    throw std::runtime_error("consumer failed to create UDP debug probe socket");
+  }
+
+  udp_probe_dst_.sin_family = AF_INET;
+  udp_probe_dst_.sin_port = htons(udp_probe_port_);
+  if (inet_pton(AF_INET, "127.0.0.1", &udp_probe_dst_.sin_addr) != 1) {
+    throw std::runtime_error("consumer failed to configure UDP debug probe destination");
+  }
+
+  std::cout << "consumer UDP debug probe forwarding RTP to 127.0.0.1:"
+            << udp_probe_port_ << '\n';
 }
 
 void Consumer::setupPeerConnection() {
@@ -78,6 +105,47 @@ void Consumer::setupPeerConnection() {
     data_channel_->onMessage([](const auto& message) {
       std::cout << "consumer received on data channel: " << formatMessage(message) << '\n';
     });
+  });
+
+  peer_connection_.onTrack([this](const std::shared_ptr<rtc::Track>& track) {
+    tracks_.push_back(track);
+    std::cout << "consumer accepted track: mid=" << track->mid()
+              << " direction=" << track->direction() << '\n';
+
+    track->onOpen([track]() {
+      std::cout << "consumer track open: " << track->mid() << '\n';
+    });
+
+    track->onClosed([track]() {
+      std::cout << "consumer track closed: " << track->mid() << '\n';
+    });
+
+    track->onError([track](const std::string& error) {
+      std::cerr << "consumer track error (" << track->mid() << "): " << error << '\n';
+    });
+
+    track->onMessage([this, track](rtc::binary message) {
+      static std::uint64_t packet_count = 0;
+      ++packet_count;
+
+      mirrorRtpToUdpProbe(message);
+
+      if (message.size() >= sizeof(rtc::RtpHeader)) {
+        const auto* header = reinterpret_cast<const rtc::RtpHeader*>(message.data());
+        if (packet_count == 1 || packet_count % 30 == 0) {
+          std::cout << "consumer received RTP packet #" << packet_count
+                    << " on track " << track->mid()
+                    << " bytes=" << message.size()
+                    << " payloadType=" << static_cast<int>(header->payloadType())
+                    << " seq=" << header->seqNumber()
+                    << " timestamp=" << header->timestamp()
+                    << " ssrc=" << header->ssrc() << '\n';
+        }
+      } else {
+        std::cout << "consumer received short media packet on track "
+                  << track->mid() << " bytes=" << message.size() << '\n';
+      }
+    }, nullptr);
   });
 }
 
@@ -185,6 +253,24 @@ void Consumer::flushPendingSignalingMessages() {
     if (!websocket_.send(payload)) {
       std::cerr << "consumer failed to flush signaling message over websocket\n";
     }
+  }
+}
+
+void Consumer::mirrorRtpToUdpProbe(const rtc::binary& packet) const {
+  if (udp_probe_fd_ < 0) {
+    return;
+  }
+
+  const ssize_t sent = sendto(
+      udp_probe_fd_,
+      reinterpret_cast<const char*>(packet.data()),
+      packet.size(),
+      0,
+      reinterpret_cast<const sockaddr*>(&udp_probe_dst_),
+      sizeof(udp_probe_dst_));
+
+  if (sent < 0) {
+    std::cerr << "consumer failed to mirror RTP packet to UDP probe\n";
   }
 }
 

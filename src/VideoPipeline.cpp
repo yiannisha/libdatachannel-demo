@@ -4,6 +4,7 @@
 #include <gst/gst.h>
 
 #include <chrono>
+#include <cstddef>
 #include <iostream>
 #include <stdexcept>
 
@@ -11,11 +12,22 @@ namespace demo {
 
 namespace {
 
-constexpr char kPipelineDescription[] =
-    "autovideosrc ! "
-    "videoconvert ! "
-    "video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! "
-    "appsink name=video_sink emit-signals=false sync=false max-buffers=1 drop=true";
+std::string makePipelineDescription() {
+#if defined(__APPLE__)
+  constexpr char kVideoSource[] = "avfvideosrc";
+#else
+  constexpr char kVideoSource[] = "autovideosrc";
+#endif
+
+  return std::string(kVideoSource) +
+         " ! "
+         "videoconvert ! "
+         "video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! "
+         "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=4000 ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
+         "appsink name=rtpsink emit-signals=true sync=false max-buffers=200 drop=false";
+}
 
 std::mutex& gstreamerInitMutex() {
   static std::mutex mutex;
@@ -35,6 +47,11 @@ VideoPipeline::~VideoPipeline() {
   stop();
 }
 
+void VideoPipeline::setTrack(std::shared_ptr<rtc::Track> track) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  track_ = std::move(track);
+}
+
 void VideoPipeline::start() {
   if (running_) {
     return;
@@ -43,7 +60,8 @@ void VideoPipeline::start() {
   ensureGStreamerInitialized();
 
   GError* error = nullptr;
-  pipeline_ = gst_parse_launch(kPipelineDescription, &error);
+  const std::string pipeline_description = makePipelineDescription();
+  pipeline_ = gst_parse_launch(pipeline_description.c_str(), &error);
   if (!pipeline_) {
     const std::string message =
         error ? error->message : "gst_parse_launch returned a null pipeline";
@@ -53,20 +71,21 @@ void VideoPipeline::start() {
     throw std::runtime_error("Failed to create GStreamer pipeline: " + message);
   }
 
-  appsink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "video_sink"));
+  appsink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "rtpsink"));
   if (!appsink_) {
     gst_object_unref(pipeline_);
     pipeline_ = nullptr;
-    throw std::runtime_error("Failed to find appsink named video_sink in pipeline");
+    throw std::runtime_error("Failed to find appsink named rtpsink in pipeline");
   }
 
-  gst_app_sink_set_emit_signals(appsink_, FALSE);
-  gst_app_sink_set_max_buffers(appsink_, 1);
+  gst_app_sink_set_emit_signals(appsink_, TRUE);
+  gst_app_sink_set_max_buffers(appsink_, 200);
 #if GST_CHECK_VERSION(1, 28, 0)
-  gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_DOWNSTREAM);
+  gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_NONE);
 #else
-  gst_app_sink_set_drop(appsink_, TRUE);
+  gst_app_sink_set_drop(appsink_, FALSE);
 #endif
+  g_signal_connect(appsink_, "new-sample", G_CALLBACK(&VideoPipeline::onNewRtpSample), this);
 
   const GstStateChangeReturn state_change =
       gst_element_set_state(pipeline_, GST_STATE_PLAYING);
@@ -76,24 +95,27 @@ void VideoPipeline::start() {
   }
 
   running_ = true;
-  sample_thread_ = std::thread([this]() {
-    sampleLoop();
+  bus_thread_ = std::thread([this]() {
+    busLoop();
   });
 
-  std::cout << "video pipeline started with camera source feeding appsink\n";
+  std::cout << "video pipeline started: " << pipeline_description << '\n';
 }
 
 void VideoPipeline::stop() {
   const bool was_running = running_.exchange(false);
-  if (was_running && sample_thread_.joinable()) {
-    sample_thread_.join();
-  } else if (sample_thread_.joinable()) {
-    sample_thread_.join();
-  }
 
   if (pipeline_) {
-    gst_element_send_event(pipeline_, gst_event_new_eos());
+    if (appsink_) {
+      g_signal_handlers_disconnect_by_data(appsink_, this);
+    }
     gst_element_set_state(pipeline_, GST_STATE_NULL);
+  }
+
+  if (was_running && bus_thread_.joinable()) {
+    bus_thread_.join();
+  } else if (bus_thread_.joinable()) {
+    bus_thread_.join();
   }
 
   if (appsink_) {
@@ -130,32 +152,73 @@ void VideoPipeline::ensureGStreamerInitialized() {
   gstreamerInitialized() = true;
 }
 
-void VideoPipeline::sampleLoop() {
-  while (running_) {
-    GstSample* sample = gst_app_sink_try_pull_sample(
-        appsink_, static_cast<GstClockTime>(250 * GST_MSECOND));
-    if (!sample) {
-      logBusMessages();
-      continue;
-    }
+GstFlowReturn VideoPipeline::onNewRtpSample(GstAppSink* sink, gpointer user_data) {
+  return static_cast<VideoPipeline*>(user_data)->handleNewRtpSample(sink);
+}
 
-    GstBuffer* buffer = gst_sample_get_buffer(sample);
-    GstCaps* caps = gst_sample_get_caps(sample);
+GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
+  GstSample* sample = gst_app_sink_pull_sample(sink);
+  if (!sample) {
+    return GST_FLOW_EOS;
+  }
 
-    ++sample_count_;
-    if (sample_count_ == 1 || sample_count_ % 30 == 0) {
-      gchar* caps_text = caps ? gst_caps_to_string(caps) : nullptr;
-      const gsize buffer_size = buffer ? gst_buffer_get_size(buffer) : 0;
-      std::cout << "video pipeline received sample #" << sample_count_
-                << " size=" << buffer_size
-                << " caps=" << (caps_text ? caps_text : "<unknown>") << '\n';
-      if (caps_text) {
-        g_free(caps_text);
-      }
-    }
-
+  GstBuffer* buffer = gst_sample_get_buffer(sample);
+  GstCaps* caps = gst_sample_get_caps(sample);
+  if (!buffer) {
     gst_sample_unref(sample);
+    return GST_FLOW_ERROR;
+  }
+
+  GstMapInfo map;
+  if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+    gst_sample_unref(sample);
+    return GST_FLOW_ERROR;
+  }
+
+  std::shared_ptr<rtc::Track> track;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    track = track_;
+  }
+
+  const bool track_open = track && track->isOpen();
+  const bool sent = track_open
+      ? track->send(reinterpret_cast<const rtc::byte*>(map.data), map.size)
+      : false;
+
+  ++rtp_packet_count_;
+  if (rtp_packet_count_ == 1 || rtp_packet_count_ % 30 == 0) {
+    gchar* caps_text = caps ? gst_caps_to_string(caps) : nullptr;
+    if (map.size >= sizeof(rtc::RtpHeader)) {
+      const auto* header = reinterpret_cast<const rtc::RtpHeader*>(map.data);
+      std::cout << "video pipeline produced RTP packet #" << rtp_packet_count_
+                << " bytes=" << map.size
+                << " payloadType=" << static_cast<int>(header->payloadType())
+                << " seq=" << header->seqNumber()
+                << " timestamp=" << header->timestamp()
+                << " ssrc=" << header->ssrc()
+                << " trackOpen=" << (track_open ? "true" : "false")
+                << " forwarded=" << (sent ? "true" : "buffered-or-skipped")
+                << " caps=" << (caps_text ? caps_text : "<unknown>") << '\n';
+    } else {
+      std::cout << "video pipeline produced short RTP packet #" << rtp_packet_count_
+                << " bytes=" << map.size << '\n';
+    }
+
+    if (caps_text) {
+      g_free(caps_text);
+    }
+  }
+
+  gst_buffer_unmap(buffer, &map);
+  gst_sample_unref(sample);
+  return GST_FLOW_OK;
+}
+
+void VideoPipeline::busLoop() {
+  while (running_) {
     logBusMessages();
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
   }
 
   logBusMessages();

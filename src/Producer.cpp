@@ -2,6 +2,7 @@
 
 #include "SignalingProtocol.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <thread>
 #include <utility>
@@ -36,8 +37,10 @@ Producer::Producer(uint16_t websocket_port, std::string bind_address)
         config.bindAddress = std::move(bind_address);
         return config;
       }()) {
-  video_pipeline_.start();
   setupPeerConnection();
+  setupVideoTrack();
+  video_pipeline_.setTrack(video_track_);
+  video_pipeline_.start();
   setupWebSocketServer();
 }
 
@@ -69,6 +72,25 @@ void Producer::setupPeerConnection() {
   peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
     queueOrSendSignalingMessage(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
+  });
+}
+
+void Producer::setupVideoTrack() {
+  constexpr rtc::SSRC kVideoSsrc = 42;
+
+  rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
+  video.addH264Codec(96);
+  video.addSSRC(kVideoSsrc, "video", "stream1", "track1");
+
+  video_track_ = peer_connection_.addTrack(video);
+  video_track_->onOpen([this]() {
+    std::cout << "producer video track open (" << video_track_->mid() << ")\n";
+  });
+  video_track_->onClosed([]() {
+    std::cout << "producer video track closed\n";
+  });
+  video_track_->onError([](const std::string& error) {
+    std::cerr << "producer video track error: " << error << '\n';
   });
 }
 

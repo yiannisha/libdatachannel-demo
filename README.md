@@ -15,8 +15,11 @@ The `producer` / `consumer` flow is the main demo for running across two differe
 - starts a WebSocket signaling server
 - accepts exactly one WebSocket client
 - starts a local GStreamer camera pipeline
-- pulls raw video frames from an `appsink`
-- logs frame arrival so you can confirm camera capture is working
+- captures camera frames
+- encodes them with `x264enc`
+- packetizes them with `rtph264pay`
+- pulls complete RTP packets from an `appsink`
+- forwards those RTP packets directly into a send-only WebRTC H.264 track
 - creates a `DataChannel` named `producer-demo`
 - sends a few example messages over the `DataChannel`
 
@@ -24,15 +27,17 @@ The `producer` / `consumer` flow is the main demo for running across two differe
 
 - creates its own `rtc::PeerConnection`
 - connects to the producer's WebSocket signaling server
+- receives the incoming H.264 video track with `onTrack(...)`
+- logs RTP packets received on that track
+- mirrors received RTP packets to a local UDP debug probe on `127.0.0.1:5004`
 - receives the incoming `DataChannel` in `onDataChannel(...)`
 - prints messages received over WebRTC
 
 WebSockets are used only for signaling. The demo messages themselves are sent over the WebRTC data channel.
 
-The current video path is local only:
+The current video path is:
 
-- laptop camera -> GStreamer pipeline -> `appsink`
-- the frames are logged but are not yet fed into WebRTC
+- laptop camera -> GStreamer -> H.264 encode -> RTP packetize -> `appsink` -> `rtc::Track`
 
 ## Signaling Protocol
 
@@ -68,6 +73,13 @@ When a side receives:
 
 If ICE candidates arrive before the remote description is set, they are queued and applied later.
 
+The same signaling flow is used for both:
+
+- the WebRTC data channel
+- the producer's H.264 video track
+
+No separate media signaling path is needed. The media track is negotiated through the same SDP and ICE exchange.
+
 ## Requirements
 
 - C++17 compiler
@@ -78,7 +90,7 @@ If ICE candidates arrive before the remote description is set, they are queued a
 On macOS with Homebrew:
 
 ```bash
-brew install cmake openssl@3 gstreamer gst-plugins-base gst-plugins-good
+brew install cmake openssl@3 gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly
 ```
 
 On Ubuntu / Debian:
@@ -93,7 +105,9 @@ sudo apt install -y \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base \
-  gstreamer1.0-plugins-good
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly
 ```
 
 On Fedora:
@@ -111,6 +125,12 @@ sudo dnf install -y \
   gstreamer1-plugins-good
 ```
 
+On Fedora, the exact packages providing `x264enc` can depend on your enabled repositories. You need the GStreamer plugin set that includes:
+
+- `x264enc`
+- `h264parse`
+- `rtph264pay`
+
 On Arch Linux:
 
 ```bash
@@ -121,7 +141,9 @@ sudo pacman -S --needed \
   openssl \
   gstreamer \
   gst-plugins-base \
-  gst-plugins-good
+  gst-plugins-good \
+  gst-plugins-bad \
+  gst-plugins-ugly
 ```
 
 ## Build
@@ -149,6 +171,12 @@ GStreamer is discovered via `pkg-config`. If configure fails, verify these modul
 - `gstreamer-1.0`
 - `gstreamer-app-1.0`
 
+At runtime, the producer also requires these GStreamer elements:
+
+- `x264enc`
+- `h264parse`
+- `rtph264pay`
+
 ## Run
 
 ### Cross-device Producer/Consumer Demo
@@ -162,10 +190,18 @@ On the producer machine:
 When the producer starts, it also starts this GStreamer pipeline:
 
 ```text
-autovideosrc ! videoconvert ! video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! appsink
+<platform camera source> !
+videoconvert !
+video/x-raw,format=I420,width=640,height=480,framerate=30/1 !
+x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=4000 !
+h264parse config-interval=-1 !
+rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency !
+appsink
 ```
 
-So you should see local camera capture logs even before a consumer connects.
+On macOS the source is `avfvideosrc`. On Linux it defaults to `autovideosrc`.
+
+So you should see RTP packet logs even before a consumer connects, and once the WebRTC track opens those packets are forwarded into the peer connection.
 
 Arguments:
 
@@ -184,6 +220,21 @@ Example:
 ./scripts/run_consumer.sh ws://192.168.1.50:8080/
 ```
 
+To visualize the RTP mirrored by the consumer on the same machine, run:
+
+```bash
+gst-launch-1.0 -v \
+  udpsrc port=5004 caps="application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96" \
+  ! rtpjitterbuffer latency=30 drop-on-latency=true \
+  ! rtph264depay \
+  ! h264parse \
+  ! avdec_h264 \
+  ! videoconvert \
+  ! autovideosink sync=false
+```
+
+The consumer forwards raw RTP packets exactly as received from the WebRTC video track to that local UDP port.
+
 ### Single-process Demo
 
 ```bash
@@ -195,15 +246,16 @@ Example:
 Producer:
 
 ```text
-video pipeline started with camera source feeding appsink
+video pipeline started: avfvideosrc ! ... ! x264enc ... ! h264parse ... ! rtph264pay ... ! appsink
 producer websocket server listening on ws://0.0.0.0:8080/
 video pipeline state changed: NULL -> READY
 video pipeline state changed: READY -> PAUSED
-video pipeline received sample #1 size=460800 caps=video/x-raw, width=(int)640, height=(int)480, framerate=(fraction)30/1, format=(string)I420
+video pipeline produced RTP packet #1 bytes=779 payloadType=96 seq=3591 timestamp=3669289752 ssrc=42 trackOpen=false forwarded=buffered-or-skipped ...
 video pipeline state changed: PAUSED -> PLAYING
 producer websocket client connected
 producer generated local description
 producer peer state: connecting
+producer video track open (video)
 producer peer state: connected
 producer data channel open (producer-demo)
 ```
@@ -211,8 +263,12 @@ producer data channel open (producer-demo)
 Consumer:
 
 ```text
+consumer UDP debug probe forwarding RTP to 127.0.0.1:5004
 consumer websocket connected to ws://PRODUCER_HOST_OR_IP:8080/
+consumer accepted track: mid=video direction=recvonly
 consumer generated local description
+consumer track open: video
+consumer received RTP packet #1 on track video bytes=120 payloadType=96 seq=4534 timestamp=3669434654 ssrc=42
 consumer accepted data channel: producer-demo
 consumer data channel open (producer-demo)
 consumer received on data channel: hello from producer
@@ -235,8 +291,11 @@ consumer received on data channel: third message from producer
 - The producer accepts only one signaling WebSocket client.
 - The demo uses a public STUN server but does not use TURN.
 - Across restrictive NATs or firewalls, peer-to-peer connectivity may fail.
-- The GStreamer pipeline currently captures camera frames only for local logging.
-  The frame data are not yet sent into libdatachannel / WebRTC.
+- The producer currently forwards RTP packets directly from GStreamer into the WebRTC track.
+  This verifies H.264 RTP transport through libdatachannel, but it is still a low-level RTP path.
+  There is not yet a receiver-side decoder or player in this repo.
+- The consumer's UDP debug probe is local only.
+  It mirrors packets to `127.0.0.1:5004` for debugging and local visualization.
 - The signaling JSON schema only carries `command` and `description`.
   SDP type is inferred from local signaling state rather than sent explicitly.
   ICE `mid` is not sent separately.
