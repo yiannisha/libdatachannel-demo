@@ -31,7 +31,7 @@ endif()
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(NO_MEDIA ON CACHE BOOL "" FORCE)
-set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+set(NO_WEBSOCKET OFF CACHE BOOL "" FORCE)
 set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
 set(NO_TESTS ON CACHE BOOL "" FORCE)
 
@@ -43,7 +43,15 @@ FetchContent_Declare(
   GIT_SUBMODULES_RECURSE TRUE
 )
 
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+  GIT_SHALLOW TRUE
+)
+
 FetchContent_MakeAvailable(libdatachannel)
+FetchContent_MakeAvailable(nlohmann_json)
 
 add_executable(
   libdatachannel_demo
@@ -51,3 +59,23 @@ add_executable(
   src/main.cpp
 )
 target_link_libraries(libdatachannel_demo PRIVATE LibDataChannel::LibDataChannel)
+
+add_library(
+  p2p_demo_common
+  src/Consumer.cpp
+  src/Producer.cpp
+  src/SignalingProtocol.cpp
+)
+target_link_libraries(
+  p2p_demo_common
+  PUBLIC
+    LibDataChannel::LibDataChannel
+    nlohmann_json::nlohmann_json
+)
+target_include_directories(p2p_demo_common PUBLIC src)
+
+add_executable(producer src/producer_main.cpp)
+target_link_libraries(producer PRIVATE p2p_demo_common)
+
+add_executable(consumer src/consumer_main.cpp)
+target_link_libraries(consumer PRIVATE p2p_demo_common)
