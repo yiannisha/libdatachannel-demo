@@ -10,14 +10,21 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace demo {
 
 class VideoPipeline {
  public:
+  struct TrackBinding {
+    std::string sink_name;
+    std::shared_ptr<rtc::Track> track;
+  };
+
   enum class Profile {
     Default,
     ZedAppsink,
+    ZedTwoStreamAppsink,
   };
 
   explicit VideoPipeline(Profile profile = Profile::Default);
@@ -27,7 +34,7 @@ class VideoPipeline {
   VideoPipeline(const VideoPipeline&) = delete;
   VideoPipeline& operator=(const VideoPipeline&) = delete;
 
-  void setTrack(std::shared_ptr<rtc::Track> track);
+  void setTrackBindings(std::vector<TrackBinding> bindings);
   void start();
   void stop();
   bool isRunning() const;
@@ -40,14 +47,20 @@ class VideoPipeline {
   void busLoop();
   void logBusMessages();
 
+  struct ActiveOutput {
+    std::string sink_name;
+    GstAppSink* appsink = nullptr;
+    std::shared_ptr<rtc::Track> track;
+    std::uint64_t rtp_packet_count = 0;
+  };
+
   GstElement* pipeline_ = nullptr;
-  GstAppSink* appsink_ = nullptr;
   std::thread bus_thread_;
   std::atomic<bool> running_{false};
   Profile profile_ = Profile::Default;
-  std::shared_ptr<rtc::Track> track_;
+  std::vector<TrackBinding> track_bindings_;
+  std::vector<ActiveOutput> outputs_;
   std::mutex mutex_;
-  std::uint64_t rtp_packet_count_ = 0;
 };
 
 }  // namespace demo

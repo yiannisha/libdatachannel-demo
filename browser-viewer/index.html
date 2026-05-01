@@ -100,7 +100,39 @@
       gap: 18px;
     }
 
-    video {
+    .streams-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }
+
+    .stream-tile {
+      background: rgba(12, 18, 23, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .stream-title {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .empty {
+      min-height: 280px;
+      display: grid;
+      place-items: center;
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+      color: var(--muted);
+      padding: 16px;
+      text-align: center;
+    }
+
+    .stream-tile video {
       width: 100%;
       aspect-ratio: 16 / 9;
       background: #000;
@@ -146,7 +178,7 @@
 <body>
   <div class="wrap">
     <h1>libdatachannel Browser Viewer</h1>
-    <p>Connects directly to the producer's WebSocket signaling server, receives the remote WebRTC video track, and renders it in the browser.</p>
+    <p>Connects directly to the producer's WebSocket signaling server, receives the remote WebRTC video tracks, and renders each stream in its own tile.</p>
 
     <div class="controls">
       <div>
@@ -159,12 +191,14 @@
 
     <div class="grid">
       <div class="panel">
-        <video id="remote-video" autoplay playsinline controls muted></video>
+        <div id="remote-streams" class="streams-grid">
+          <div class="empty">Waiting for remote video tracks.</div>
+        </div>
         <div class="status">
           <span id="ws-state" class="pill">ws: idle</span>
           <span id="pc-state" class="pill">pc: idle</span>
           <span id="ice-state" class="pill">ice: idle</span>
-          <span id="track-state" class="pill">track: none</span>
+          <span id="track-state" class="pill">tracks: none</span>
         </div>
       </div>
 
@@ -178,7 +212,7 @@
     const wsUrlInput = document.getElementById("ws-url");
     const connectButton = document.getElementById("connect");
     const disconnectButton = document.getElementById("disconnect");
-    const remoteVideo = document.getElementById("remote-video");
+    const remoteStreamsEl = document.getElementById("remote-streams");
     const logEl = document.getElementById("log");
     const wsStateEl = document.getElementById("ws-state");
     const pcStateEl = document.getElementById("pc-state");
@@ -189,6 +223,7 @@
     let pc = null;
     let remoteDescriptionSet = false;
     let pendingRemoteCandidates = [];
+    const trackTiles = new Map();
 
     function log(message) {
       const timestamp = new Date().toLocaleTimeString();
@@ -199,6 +234,81 @@
     function setPill(el, text, mode = "") {
       el.textContent = text;
       el.className = `pill ${mode}`.trim();
+    }
+
+    function updateTrackState() {
+      const count = trackTiles.size;
+      setPill(
+        trackStateEl,
+        count === 0 ? "tracks: none" : `tracks: ${count}`,
+        count > 0 ? "good" : ""
+      );
+    }
+
+    function showEmptyState() {
+      if (trackTiles.size === 0) {
+        remoteStreamsEl.innerHTML = '<div class="empty">Waiting for remote video tracks.</div>';
+      }
+    }
+
+    function removeTrackTile(trackId, reason = "ended") {
+      const entry = trackTiles.get(trackId);
+      if (!entry) {
+        return;
+      }
+
+      entry.track.onended = null;
+      entry.video.srcObject = null;
+      entry.container.remove();
+      trackTiles.delete(trackId);
+      showEmptyState();
+      updateTrackState();
+      if (reason !== "removed") {
+        log(`remote track ${reason} id=${trackId}`);
+      }
+    }
+
+    function addTrackTile(track, stream, transceiverMid) {
+      if (trackTiles.has(track.id)) {
+        return;
+      }
+
+      if (trackTiles.size === 0) {
+        remoteStreamsEl.textContent = "";
+      }
+
+      const container = document.createElement("section");
+      container.className = "stream-tile";
+
+      const title = document.createElement("p");
+      title.className = "stream-title";
+      title.textContent = transceiverMid
+        ? `${transceiverMid} • ${stream.id || track.id}`
+        : (stream.id || track.id);
+
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.playsInline = true;
+      video.controls = true;
+      video.muted = true;
+      video.srcObject = new MediaStream([track]);
+
+      container.append(title, video);
+      remoteStreamsEl.appendChild(container);
+
+      track.onended = () => {
+        removeTrackTile(track.id);
+      };
+
+      trackTiles.set(track.id, { container, video, track });
+      updateTrackState();
+    }
+
+    function clearTrackTiles() {
+      for (const trackId of Array.from(trackTiles.keys())) {
+        removeTrackTile(trackId, "removed");
+      }
+      showEmptyState();
     }
 
     function cleanup() {
@@ -226,11 +336,11 @@
         pc = null;
       }
 
-      remoteVideo.srcObject = null;
+      clearTrackTiles();
       setPill(wsStateEl, "ws: idle");
       setPill(pcStateEl, "pc: idle");
       setPill(iceStateEl, "ice: idle");
-      setPill(trackStateEl, "track: none");
+      setPill(trackStateEl, "tracks: none");
     }
 
     async function handleRemoteCandidate(message) {
@@ -281,10 +391,11 @@
       };
 
       pc.ontrack = (event) => {
-        const [stream] = event.streams;
-        remoteVideo.srcObject = stream;
-        setPill(trackStateEl, `track: ${event.track.kind}`, "good");
-        log(`received remote track kind=${event.track.kind} id=${event.track.id}`);
+        const stream = event.streams[0] || new MediaStream([event.track]);
+        addTrackTile(event.track, stream, event.transceiver?.mid || "");
+        log(
+          `received remote track kind=${event.track.kind} id=${event.track.id} stream=${stream.id || "<generated>"} mid=${event.transceiver?.mid || "<none>"}`
+        );
       };
 
       pc.ondatachannel = (event) => {

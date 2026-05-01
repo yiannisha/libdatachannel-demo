@@ -3,14 +3,23 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace demo {
 
 namespace {
+
+struct OutputSpec {
+  const char* sink_name;
+  guint max_buffers;
+  bool drop;
+};
 
 std::string makeDefaultPipelineDescription() {
 #if defined(__APPLE__)
@@ -93,7 +102,7 @@ std::string makeZedAppsinkPipelineDescription() {
 
 std::string makeZedAppsinkPipelineDescription() {
   return "zedsrc "
-           "stream-type=6 "
+           "stream-type=7 "
            "camera-resolution=2 "
            "camera-fps=30 "
 
@@ -141,12 +150,70 @@ std::string makeZedAppsinkPipelineDescription() {
            "wait-on-eos=false";
 }
 
+std::string makeZedTwoStreamAppsinkPipelineDescription() {
+  return "zedsrc stream-type=2 camera-resolution=2 camera-fps=30 ! "
+         "queue max-size-buffers=1 leaky=downstream ! "
+         "zeddemux is-depth=false is-mono=false name=demux "
+
+         "demux.src_left ! "
+         "queue max-size-buffers=1 leaky=downstream ! "
+         "videoconvert ! video/x-raw,format=RGBA ! "
+         "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+         "nvv4l2h264enc "
+           "maxperf-enable=1 "
+           "preset-level=1 "
+           "insert-sps-pps=true "
+           "iframeinterval=30 "
+           "idrinterval=30 "
+           "bitrate=4000000 "
+           "control-rate=1 "
+           "num-B-Frames=0 ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
+         "appsink name=rtpsink_left emit-signals=true sync=false async=false max-buffers=1 drop=true wait-on-eos=false "
+
+         "demux.src_aux ! "
+         "queue max-size-buffers=1 leaky=downstream ! "
+         "videoconvert ! video/x-raw,format=RGBA ! "
+         "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+         "nvv4l2h264enc "
+           "maxperf-enable=1 "
+           "preset-level=1 "
+           "insert-sps-pps=true "
+           "iframeinterval=30 "
+           "idrinterval=30 "
+           "bitrate=4000000 "
+           "control-rate=1 "
+           "num-B-Frames=0 ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay pt=97 ssrc=43 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
+         "appsink name=rtpsink_right emit-signals=true sync=false async=false max-buffers=1 drop=true wait-on-eos=false";
+}
+
 std::string makePipelineDescription(VideoPipeline::Profile profile) {
   switch (profile) {
     case VideoPipeline::Profile::Default:
       return makeDefaultPipelineDescription();
     case VideoPipeline::Profile::ZedAppsink:
       return makeZedAppsinkPipelineDescription();
+    case VideoPipeline::Profile::ZedTwoStreamAppsink:
+      return makeZedTwoStreamAppsinkPipelineDescription();
+  }
+
+  throw std::runtime_error("Unsupported video pipeline profile");
+}
+
+std::vector<OutputSpec> makeOutputSpecs(VideoPipeline::Profile profile) {
+  switch (profile) {
+    case VideoPipeline::Profile::Default:
+      return {OutputSpec{"rtpsink", 200, false}};
+    case VideoPipeline::Profile::ZedAppsink:
+      return {OutputSpec{"rtpsink", 1, true}};
+    case VideoPipeline::Profile::ZedTwoStreamAppsink:
+      return {
+          OutputSpec{"rtpsink_left", 1, true},
+          OutputSpec{"rtpsink_right", 1, true},
+      };
   }
 
   throw std::runtime_error("Unsupported video pipeline profile");
@@ -174,9 +241,9 @@ VideoPipeline::~VideoPipeline() {
   stop();
 }
 
-void VideoPipeline::setTrack(std::shared_ptr<rtc::Track> track) {
+void VideoPipeline::setTrackBindings(std::vector<TrackBinding> bindings) {
   std::lock_guard<std::mutex> lock(mutex_);
-  track_ = std::move(track);
+  track_bindings_ = std::move(bindings);
 }
 
 void VideoPipeline::start() {
@@ -198,30 +265,70 @@ void VideoPipeline::start() {
     throw std::runtime_error("Failed to create GStreamer pipeline: " + message);
   }
 
-  appsink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "rtpsink"));
-  if (!appsink_) {
-    gst_object_unref(pipeline_);
-    pipeline_ = nullptr;
-    throw std::runtime_error("Failed to find appsink named rtpsink in pipeline");
+  std::vector<TrackBinding> track_bindings;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    track_bindings = track_bindings_;
   }
 
-  gst_app_sink_set_emit_signals(appsink_, TRUE);
-  if (profile_ == Profile::ZedAppsink) {
-    gst_app_sink_set_max_buffers(appsink_, 1);
+  std::vector<ActiveOutput> outputs;
+  const std::vector<OutputSpec> output_specs = makeOutputSpecs(profile_);
+  outputs.reserve(output_specs.size());
+
+  try {
+    for (const OutputSpec& spec : output_specs) {
+      GstAppSink* appsink =
+          GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), spec.sink_name));
+      if (!appsink) {
+        throw std::runtime_error(
+            "Failed to find appsink named " + std::string(spec.sink_name) +
+            " in pipeline");
+      }
+
+      const auto binding_it = std::find_if(
+          track_bindings.begin(),
+          track_bindings.end(),
+          [&spec](const TrackBinding& binding) {
+            return binding.sink_name == spec.sink_name;
+          });
+      if (binding_it == track_bindings.end() || !binding_it->track) {
+        gst_object_unref(appsink);
+        throw std::runtime_error(
+            "Missing track binding for appsink " + std::string(spec.sink_name));
+      }
+
+      gst_app_sink_set_emit_signals(appsink, TRUE);
+      gst_app_sink_set_max_buffers(appsink, spec.max_buffers);
 #if GST_CHECK_VERSION(1, 28, 0)
-    gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_DOWNSTREAM);
+      gst_app_sink_set_leaky_type(
+          appsink,
+          spec.drop ? GST_APP_LEAKY_TYPE_DOWNSTREAM : GST_APP_LEAKY_TYPE_NONE);
 #else
-    gst_app_sink_set_drop(appsink_, TRUE);
+      gst_app_sink_set_drop(appsink, spec.drop ? TRUE : FALSE);
 #endif
-  } else {
-    gst_app_sink_set_max_buffers(appsink_, 200);
-#if GST_CHECK_VERSION(1, 28, 0)
-    gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_NONE);
-#else
-    gst_app_sink_set_drop(appsink_, FALSE);
-#endif
+      g_signal_connect(
+          appsink, "new-sample", G_CALLBACK(&VideoPipeline::onNewRtpSample), this);
+
+      outputs.push_back(ActiveOutput{
+          std::string(spec.sink_name),
+          appsink,
+          binding_it->track,
+          0,
+      });
+    }
+  } catch (...) {
+    for (const ActiveOutput& output : outputs) {
+      gst_object_unref(output.appsink);
+    }
+    gst_object_unref(pipeline_);
+    pipeline_ = nullptr;
+    throw;
   }
-  g_signal_connect(appsink_, "new-sample", G_CALLBACK(&VideoPipeline::onNewRtpSample), this);
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    outputs_ = std::move(outputs);
+  }
 
   const GstStateChangeReturn state_change =
       gst_element_set_state(pipeline_, GST_STATE_PLAYING);
@@ -240,10 +347,18 @@ void VideoPipeline::start() {
 
 void VideoPipeline::stop() {
   const bool was_running = running_.exchange(false);
+  std::vector<GstAppSink*> sinks;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sinks.reserve(outputs_.size());
+    for (const ActiveOutput& output : outputs_) {
+      sinks.push_back(output.appsink);
+    }
+  }
 
   if (pipeline_) {
-    if (appsink_) {
-      g_signal_handlers_disconnect_by_data(appsink_, this);
+    for (GstAppSink* sink : sinks) {
+      g_signal_handlers_disconnect_by_data(sink, this);
     }
     gst_element_set_state(pipeline_, GST_STATE_NULL);
   }
@@ -254,14 +369,18 @@ void VideoPipeline::stop() {
     bus_thread_.join();
   }
 
-  if (appsink_) {
-    gst_object_unref(appsink_);
-    appsink_ = nullptr;
+  for (GstAppSink* sink : sinks) {
+    gst_object_unref(sink);
   }
 
   if (pipeline_) {
     gst_object_unref(pipeline_);
     pipeline_ = nullptr;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    outputs_.clear();
   }
 }
 
@@ -312,9 +431,25 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
   }
 
   std::shared_ptr<rtc::Track> track;
+  std::string sink_name;
+  std::uint64_t packet_count = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    track = track_;
+    const auto output_it = std::find_if(
+        outputs_.begin(),
+        outputs_.end(),
+        [sink](const ActiveOutput& output) {
+          return output.appsink == sink;
+        });
+    if (output_it == outputs_.end()) {
+      gst_buffer_unmap(buffer, &map);
+      gst_sample_unref(sample);
+      return GST_FLOW_ERROR;
+    }
+
+    track = output_it->track;
+    sink_name = output_it->sink_name;
+    packet_count = ++output_it->rtp_packet_count;
   }
 
   const bool track_open = track && track->isOpen();
@@ -322,12 +457,12 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
       ? track->send(reinterpret_cast<const rtc::byte*>(map.data), map.size)
       : false;
 
-  ++rtp_packet_count_;
-  if (rtp_packet_count_ == 1 || rtp_packet_count_ % 30 == 0) {
+  if (packet_count == 1 || packet_count % 30 == 0) {
     gchar* caps_text = caps ? gst_caps_to_string(caps) : nullptr;
     if (map.size >= sizeof(rtc::RtpHeader)) {
       const auto* header = reinterpret_cast<const rtc::RtpHeader*>(map.data);
-      std::cout << "video pipeline produced RTP packet #" << rtp_packet_count_
+      std::cout << "video pipeline output " << sink_name
+                << " produced RTP packet #" << packet_count
                 << " bytes=" << map.size
                 << " payloadType=" << static_cast<int>(header->payloadType())
                 << " seq=" << header->seqNumber()
@@ -337,7 +472,8 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
                 << " forwarded=" << (sent ? "true" : "buffered-or-skipped")
                 << " caps=" << (caps_text ? caps_text : "<unknown>") << '\n';
     } else {
-      std::cout << "video pipeline produced short RTP packet #" << rtp_packet_count_
+      std::cout << "video pipeline output " << sink_name
+                << " produced short RTP packet #" << packet_count
                 << " bytes=" << map.size << '\n';
     }
 

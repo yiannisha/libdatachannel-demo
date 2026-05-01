@@ -219,11 +219,18 @@ Supported producer pipeline profiles:
 
 - `default`: current cross-platform camera pipeline using `avfvideosrc` on macOS or `autovideosrc` on Linux
 - `zed-appsink`: simple ZED camera path based on `zedsrc`, matching the plain `../gst-test/zed-gstreamer/scripts/linux/simple-fps_rendering.sh` source side and then feeding the existing encode/RTP/appsink chain
+- `zed-two-stream-appsink`: ZED two-output path that demuxes the camera feed into separate left and auxiliary RTP appsinks and publishes both as independent WebRTC video tracks
 
 Example:
 
 ```bash
 ./scripts/run_producer.sh 8080 0.0.0.0 zed-appsink
+```
+
+Two-stream example:
+
+```bash
+./scripts/run_producer.sh 8080 0.0.0.0 zed-two-stream-appsink
 ```
 
 On the consumer machine:
@@ -268,8 +275,10 @@ The page will:
 - receive the producer's SDP offer
 - create and send an SDP answer
 - exchange ICE candidates
-- attach the remote WebRTC video track to a `<video>` element
+- attach each remote WebRTC video track to its own `<video>` tile
 - log the incoming data channel messages
+
+With `zed-two-stream-appsink`, the browser viewer renders two remote video tiles, one per outbound producer track.
 
 To visualize the RTP mirrored by the consumer on the same machine, run:
 

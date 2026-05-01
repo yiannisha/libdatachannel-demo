@@ -23,7 +23,7 @@ class Producer {
  private:
   void setupPeerConnection();
   void setupWebSocketServer();
-  void setupVideoTrack();
+  void setupVideoTracks(VideoPipeline::Profile video_pipeline_profile);
   void attachClient(const std::shared_ptr<rtc::WebSocket>& client);
   void handleWebSocketMessage(const std::string& payload);
   void handleRemoteDescription(const rtc::Description& description);
@@ -38,7 +38,7 @@ class Producer {
 
   std::shared_ptr<rtc::WebSocket> client_;
   std::shared_ptr<rtc::DataChannel> data_channel_;
-  std::shared_ptr<rtc::Track> video_track_;
+  std::vector<std::shared_ptr<rtc::Track>> video_tracks_;
 
   mutable std::mutex mutex_;
   bool remote_description_set_ = false;

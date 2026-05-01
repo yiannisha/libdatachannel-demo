@@ -2,15 +2,29 @@
 
 #include "SignalingProtocol.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace demo {
 
 namespace {
+
+struct VideoTrackSpec {
+  std::string sink_name;
+  std::string mid;
+  uint8_t payload_type;
+  rtc::SSRC ssrc;
+  std::string cname;
+  std::string stream_id;
+  std::string track_id;
+};
 
 rtc::Configuration makePeerConfiguration() {
   rtc::Configuration config;
@@ -27,6 +41,64 @@ std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message)
          std::to_string(std::get<rtc::binary>(message).size()) + " bytes>";
 }
 
+std::vector<VideoTrackSpec> makeVideoTrackSpecs(
+    VideoPipeline::Profile video_pipeline_profile) {
+  switch (video_pipeline_profile) {
+    case VideoPipeline::Profile::Default:
+    case VideoPipeline::Profile::ZedAppsink:
+      return {VideoTrackSpec{
+          "rtpsink",
+          "video",
+          96,
+          42,
+          "video",
+          "stream1",
+          "track1",
+      }};
+    case VideoPipeline::Profile::ZedTwoStreamAppsink:
+      return {
+          VideoTrackSpec{
+              "rtpsink_left",
+              "video-left",
+              96,
+              42,
+              "video-left",
+              "stream-left",
+              "track-left",
+          },
+          VideoTrackSpec{
+              "rtpsink_right",
+              "video-right",
+              97,
+              43,
+              "video-right",
+              "stream-right",
+              "track-right",
+          },
+      };
+  }
+
+  throw std::runtime_error("Unsupported video pipeline profile");
+}
+
+std::vector<VideoPipeline::TrackBinding> makeTrackBindings(
+    const std::vector<VideoTrackSpec>& specs,
+    const std::vector<std::shared_ptr<rtc::Track>>& tracks) {
+  if (specs.size() != tracks.size()) {
+    throw std::runtime_error("Video track spec count does not match track count");
+  }
+
+  std::vector<VideoPipeline::TrackBinding> bindings;
+  bindings.reserve(specs.size());
+  for (std::size_t index = 0; index < specs.size(); ++index) {
+    bindings.push_back(VideoPipeline::TrackBinding{
+        specs[index].sink_name,
+        tracks[index],
+    });
+  }
+  return bindings;
+}
+
 }  // namespace
 
 Producer::Producer(uint16_t websocket_port,
@@ -41,8 +113,9 @@ Producer::Producer(uint16_t websocket_port,
       }()),
       video_pipeline_(video_pipeline_profile) {
   setupPeerConnection();
-  setupVideoTrack();
-  video_pipeline_.setTrack(video_track_);
+  setupVideoTracks(video_pipeline_profile);
+  video_pipeline_.setTrackBindings(
+      makeTrackBindings(makeVideoTrackSpecs(video_pipeline_profile), video_tracks_));
   video_pipeline_.start();
   setupWebSocketServer();
 }
@@ -78,23 +151,29 @@ void Producer::setupPeerConnection() {
   });
 }
 
-void Producer::setupVideoTrack() {
-  constexpr rtc::SSRC kVideoSsrc = 42;
+void Producer::setupVideoTracks(VideoPipeline::Profile video_pipeline_profile) {
+  const std::vector<VideoTrackSpec> specs = makeVideoTrackSpecs(video_pipeline_profile);
+  video_tracks_.reserve(specs.size());
 
-  rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
-  video.addH264Codec(96);
-  video.addSSRC(kVideoSsrc, "video", "stream1", "track1");
+  for (const VideoTrackSpec& spec : specs) {
+    rtc::Description::Video video(spec.mid, rtc::Description::Direction::SendOnly);
+    video.addH264Codec(spec.payload_type);
+    video.addSSRC(spec.ssrc, spec.cname, spec.stream_id, spec.track_id);
 
-  video_track_ = peer_connection_.addTrack(video);
-  video_track_->onOpen([this]() {
-    std::cout << "producer video track open (" << video_track_->mid() << ")\n";
-  });
-  video_track_->onClosed([]() {
-    std::cout << "producer video track closed\n";
-  });
-  video_track_->onError([](const std::string& error) {
-    std::cerr << "producer video track error: " << error << '\n';
-  });
+    std::shared_ptr<rtc::Track> track = peer_connection_.addTrack(video);
+    track->onOpen([track, mid = spec.mid]() {
+      std::cout << "producer video track open (" << mid
+                << ", negotiated-mid=" << track->mid() << ")\n";
+    });
+    track->onClosed([mid = spec.mid]() {
+      std::cout << "producer video track closed (" << mid << ")\n";
+    });
+    track->onError([mid = spec.mid](const std::string& error) {
+      std::cerr << "producer video track error (" << mid << "): " << error << '\n';
+    });
+
+    video_tracks_.push_back(std::move(track));
+  }
 }
 
 void Producer::setupWebSocketServer() {
