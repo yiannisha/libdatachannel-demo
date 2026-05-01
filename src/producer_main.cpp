@@ -19,6 +19,21 @@ uint16_t parsePort(const char* value) {
   return static_cast<uint16_t>(parsed);
 }
 
+demo::VideoPipeline::Profile parseVideoPipelineProfile(const char* value) {
+  const std::string profile = value;
+  if (profile == "default") {
+    return demo::VideoPipeline::Profile::Default;
+  }
+
+  if (profile == "zed-appsink") {
+    return demo::VideoPipeline::Profile::ZedAppsink;
+  }
+
+  throw std::invalid_argument(
+      "unknown video pipeline profile '" + profile +
+      "' (expected 'default' or 'zed-appsink')");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -27,8 +42,11 @@ int main(int argc, char** argv) {
 
     const uint16_t port = argc >= 2 ? parsePort(argv[1]) : 8080;
     const std::string bind_address = argc >= 3 ? argv[2] : "0.0.0.0";
+    const demo::VideoPipeline::Profile video_pipeline_profile =
+        argc >= 4 ? parseVideoPipelineProfile(argv[3])
+                  : demo::VideoPipeline::Profile::Default;
 
-    demo::Producer producer(port, bind_address);
+    demo::Producer producer(port, bind_address, video_pipeline_profile);
     std::cout << "producer websocket server listening on ws://" << bind_address << ':'
               << producer.port() << "/\n";
     producer.wait();

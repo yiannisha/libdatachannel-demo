@@ -29,14 +29,17 @@ std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message)
 
 }  // namespace
 
-Producer::Producer(uint16_t websocket_port, std::string bind_address)
+Producer::Producer(uint16_t websocket_port,
+                   std::string bind_address,
+                   VideoPipeline::Profile video_pipeline_profile)
     : peer_connection_(makePeerConfiguration()),
       server_([&]() {
         rtc::WebSocketServer::Configuration config;
         config.port = websocket_port;
         config.bindAddress = std::move(bind_address);
         return config;
-      }()) {
+      }()),
+      video_pipeline_(video_pipeline_profile) {
   setupPeerConnection();
   setupVideoTrack();
   video_pipeline_.setTrack(video_track_);

@@ -15,10 +15,16 @@ namespace demo {
 
 class VideoPipeline {
  public:
+  enum class Profile {
+    Default,
+    ZedAppsink,
+  };
+
+  explicit VideoPipeline(Profile profile = Profile::Default);
   VideoPipeline();
   ~VideoPipeline();
 
- VideoPipeline(const VideoPipeline&) = delete;
+  VideoPipeline(const VideoPipeline&) = delete;
   VideoPipeline& operator=(const VideoPipeline&) = delete;
 
   void setTrack(std::shared_ptr<rtc::Track> track);
@@ -38,6 +44,7 @@ class VideoPipeline {
   GstAppSink* appsink_ = nullptr;
   std::thread bus_thread_;
   std::atomic<bool> running_{false};
+  Profile profile_ = Profile::Default;
   std::shared_ptr<rtc::Track> track_;
   std::mutex mutex_;
   std::uint64_t rtp_packet_count_ = 0;

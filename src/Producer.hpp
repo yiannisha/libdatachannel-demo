@@ -12,7 +12,10 @@ namespace demo {
 
 class Producer {
  public:
-  Producer(uint16_t websocket_port, std::string bind_address = "0.0.0.0");
+  Producer(
+      uint16_t websocket_port,
+      std::string bind_address = "0.0.0.0",
+      VideoPipeline::Profile video_pipeline_profile = VideoPipeline::Profile::Default);
 
   void wait();
   uint16_t port() const;

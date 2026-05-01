@@ -12,7 +12,7 @@ namespace demo {
 
 namespace {
 
-std::string makePipelineDescription() {
+std::string makeDefaultPipelineDescription() {
 #if defined(__APPLE__)
   constexpr char kVideoSource[] = "avfvideosrc";
 #else
@@ -29,6 +29,79 @@ std::string makePipelineDescription() {
          "appsink name=rtpsink emit-signals=true sync=false max-buffers=200 drop=false";
 }
 
+/*
+std::string makeZedAppsinkPipelineDescription() {
+  return "zedsrc ! "
+         "queue ! "
+         "videoconvert ! "
+         "video/x-raw,format=I420 ! "
+         "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=4000 ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
+         "appsink name=rtpsink emit-signals=true sync=false max-buffers=200 drop=false";
+}
+*/
+
+/*
+std::string makeZedAppsinkPipelineDescription() {
+  return "zedsrc ! "
+         "queue max-size-buffers=2 leaky=downstream ! "
+         "nvvidconv ! "
+         "video/x-raw(memory:NVMM),format=NV12 ! "
+         "nvv4l2h264enc "
+           "maxperf-enable=1 "
+           "bitrate=4000000 "
+           "control-rate=1 "
+           "iframeinterval=30 "
+           "idrinterval=30 "
+           "insert-sps-pps=true ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
+         "appsink name=rtpsink emit-signals=true sync=false max-buffers=200 drop=false";
+}
+*/
+
+std::string makeZedAppsinkPipelineDescription() {
+  return "zedsrc stream-type=6 camera-resolution=2 camera-fps=30 ! "
+         "video/x-raw(memory:NVMM),format=NV12 ! "
+         "queue max-size-buffers=1 leaky=downstream ! "
+         "nvv4l2h264enc "
+           "maxperf-enable=1 "
+           "preset-level=1 "
+           "insert-sps-pps=true "
+           "iframeinterval=30 "
+           "idrinterval=30 "
+           "bitrate=4000000 "
+           "control-rate=1 "
+           "num-B-Frames=0 ! "
+         "h264parse config-interval=-1 ! "
+         "rtph264pay "
+           "pt=96 "
+           "ssrc=42 "
+           "mtu=1200 "
+           "config-interval=-1 "
+           "aggregate-mode=zero-latency ! "
+         "appsink "
+           "name=rtpsink "
+           "emit-signals=true "
+           "sync=false "
+           "async=false "
+           "max-buffers=1 "
+           "drop=true "
+           "wait-on-eos=false";
+}
+
+std::string makePipelineDescription(VideoPipeline::Profile profile) {
+  switch (profile) {
+    case VideoPipeline::Profile::Default:
+      return makeDefaultPipelineDescription();
+    case VideoPipeline::Profile::ZedAppsink:
+      return makeZedAppsinkPipelineDescription();
+  }
+
+  throw std::runtime_error("Unsupported video pipeline profile");
+}
+
 std::mutex& gstreamerInitMutex() {
   static std::mutex mutex;
   return mutex;
@@ -41,7 +114,11 @@ bool& gstreamerInitialized() {
 
 }  // namespace
 
-VideoPipeline::VideoPipeline() = default;
+VideoPipeline::VideoPipeline(Profile profile)
+    : profile_(profile) {}
+
+VideoPipeline::VideoPipeline()
+    : VideoPipeline(Profile::Default) {}
 
 VideoPipeline::~VideoPipeline() {
   stop();
@@ -60,7 +137,7 @@ void VideoPipeline::start() {
   ensureGStreamerInitialized();
 
   GError* error = nullptr;
-  const std::string pipeline_description = makePipelineDescription();
+  const std::string pipeline_description = makePipelineDescription(profile_);
   pipeline_ = gst_parse_launch(pipeline_description.c_str(), &error);
   if (!pipeline_) {
     const std::string message =
@@ -79,12 +156,21 @@ void VideoPipeline::start() {
   }
 
   gst_app_sink_set_emit_signals(appsink_, TRUE);
-  gst_app_sink_set_max_buffers(appsink_, 200);
+  if (profile_ == Profile::ZedAppsink) {
+    gst_app_sink_set_max_buffers(appsink_, 1);
 #if GST_CHECK_VERSION(1, 28, 0)
-  gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_NONE);
+    gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_DOWNSTREAM);
 #else
-  gst_app_sink_set_drop(appsink_, FALSE);
+    gst_app_sink_set_drop(appsink_, TRUE);
 #endif
+  } else {
+    gst_app_sink_set_max_buffers(appsink_, 200);
+#if GST_CHECK_VERSION(1, 28, 0)
+    gst_app_sink_set_leaky_type(appsink_, GST_APP_LEAKY_TYPE_NONE);
+#else
+    gst_app_sink_set_drop(appsink_, FALSE);
+#endif
+  }
   g_signal_connect(appsink_, "new-sample", G_CALLBACK(&VideoPipeline::onNewRtpSample), this);
 
   const GstStateChangeReturn state_change =

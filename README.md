@@ -213,6 +213,18 @@ Arguments:
 
 - first argument: WebSocket server port, default `8080`
 - second argument: bind address, default `0.0.0.0`
+- third argument: video pipeline profile, default `default`
+
+Supported producer pipeline profiles:
+
+- `default`: current cross-platform camera pipeline using `avfvideosrc` on macOS or `autovideosrc` on Linux
+- `zed-appsink`: simple ZED camera path based on `zedsrc`, matching the plain `../gst-test/zed-gstreamer/scripts/linux/simple-fps_rendering.sh` source side and then feeding the existing encode/RTP/appsink chain
+
+Example:
+
+```bash
+./scripts/run_producer.sh 8080 0.0.0.0 zed-appsink
+```
 
 On the consumer machine:
 
@@ -273,6 +285,25 @@ gst-launch-1.0 -v \
 ```
 
 The consumer forwards raw RTP packets exactly as received from the WebRTC video track to that local UDP port.
+
+For a live packet-level plot instead of a decoded video preview, run:
+
+```bash
+./scripts/run_rtp_plot.sh
+```
+
+That script listens to the same `127.0.0.1:5004` RTP mirror and opens a rolling matplotlib view with:
+
+- packets per second
+- bitrate in kbps
+- RTP sequence deltas, where values above `1` indicate gaps and values below `1` indicate reordering or duplicates
+- packet inter-arrival time in milliseconds
+
+If `matplotlib` is missing, install it with:
+
+```bash
+python3 -m pip install matplotlib
+```
 
 ### Single-process Demo
 
