@@ -54,7 +54,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(libdatachannel)
 FetchContent_MakeAvailable(nlohmann_json)
 
-pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
+pkg_check_modules(GSTREAMER IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
 
 add_executable(
   libdatachannel_demo
@@ -64,23 +64,45 @@ add_executable(
 target_link_libraries(libdatachannel_demo PRIVATE LibDataChannel::LibDataChannel)
 
 add_library(
-  p2p_demo_common
-  src/Consumer.cpp
-  src/Producer.cpp
+  p2p_text_common
   src/SignalingProtocol.cpp
-  src/VideoPipeline.cpp
+  src/TextProducer.cpp
+  src/TextConsumer.cpp
 )
 target_link_libraries(
-  p2p_demo_common
+  p2p_text_common
   PUBLIC
     LibDataChannel::LibDataChannel
     nlohmann_json::nlohmann_json
-    PkgConfig::GSTREAMER
 )
-target_include_directories(p2p_demo_common PUBLIC src)
+target_include_directories(p2p_text_common PUBLIC src)
 
-add_executable(producer src/producer_main.cpp)
-target_link_libraries(producer PRIVATE p2p_demo_common)
+if(GSTREAMER_FOUND)
+  add_library(
+    p2p_demo_common
+    src/Consumer.cpp
+    src/Producer.cpp
+    src/SignalingProtocol.cpp
+    src/VideoPipeline.cpp
+  )
+  target_link_libraries(p2p_demo_common PUBLIC PkgConfig::GSTREAMER)
+  target_link_libraries(
+    p2p_demo_common
+    PUBLIC
+      LibDataChannel::LibDataChannel
+      nlohmann_json::nlohmann_json
+  )
+  target_include_directories(p2p_demo_common PUBLIC src)
 
-add_executable(consumer src/consumer_main.cpp)
-target_link_libraries(consumer PRIVATE p2p_demo_common)
+  add_executable(producer src/producer_main.cpp)
+  target_link_libraries(producer PRIVATE p2p_demo_common)
+
+  add_executable(consumer src/consumer_main.cpp)
+  target_link_libraries(consumer PRIVATE p2p_demo_common)
+endif()
+
+add_executable(text_producer src/text_producer_main.cpp)
+target_link_libraries(text_producer PRIVATE p2p_text_common)
+
+add_executable(text_consumer src/text_consumer_main.cpp)
+target_link_libraries(text_consumer PRIVATE p2p_text_common)

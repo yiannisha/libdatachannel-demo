@@ -4,8 +4,30 @@ This repo contains two small C++ demos built on top of `libdatachannel`:
 
 - `libdatachannel_demo`: a single-process demo where two `rtc::PeerConnection` objects exchange SDP and ICE in memory
 - `producer` / `consumer`: a two-process demo where signaling happens over WebSocket and the actual payload moves over a WebRTC `DataChannel`
+- `text_producer` / `text_consumer`: a text-only two-process demo where signaling happens over WebSocket and only string messages move over a WebRTC `DataChannel`
 
 The `producer` / `consumer` flow is the main demo for running across two different devices.
+
+## Text-Only Producer/Consumer
+
+`text_producer` and `text_consumer` negotiate only a `DataChannel`. They do not create any media tracks, do not depend on GStreamer, and are the simplest binaries in the repo for plain text payloads.
+
+Run them like this:
+
+```bash
+./build/text_producer 8080 0.0.0.0 "hello" "from" "producer"
+./build/text_consumer ws://127.0.0.1:8080/
+```
+
+If no message arguments are provided, `text_producer` sends a small default sequence when the data channel opens.
+
+To keep enqueueing messages at runtime from the terminal, start the producer with `--interactive` or `--stdin`:
+
+```bash
+./build/text_producer 8080 0.0.0.0 --interactive "boot message"
+```
+
+Each line typed into stdin is queued by the producer and sent over the data channel as soon as it is available.
 
 ## What The Producer/Consumer Demo Does
 
