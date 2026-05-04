@@ -29,9 +29,13 @@ demo::VideoPipeline::Profile parseVideoPipelineProfile(const char* value) {
     return demo::VideoPipeline::Profile::ZedAppsink;
   }
 
+  if (profile == "zed-two-stream-appsink") {
+    return demo::VideoPipeline::Profile::ZedTwoStreamAppsink;
+  }
+
   throw std::invalid_argument(
       "unknown video pipeline profile '" + profile +
-      "' (expected 'default' or 'zed-appsink')");
+      "' (expected 'default', 'zed-appsink', or 'zed-two-stream-appsink')");
 }
 
 }  // namespace

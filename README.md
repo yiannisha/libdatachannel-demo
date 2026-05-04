@@ -4,8 +4,30 @@ This repo contains two small C++ demos built on top of `libdatachannel`:
 
 - `libdatachannel_demo`: a single-process demo where two `rtc::PeerConnection` objects exchange SDP and ICE in memory
 - `producer` / `consumer`: a two-process demo where signaling happens over WebSocket and the actual payload moves over a WebRTC `DataChannel`
+- `text_producer` / `text_consumer`: a text-only two-process demo where signaling happens over WebSocket and only string messages move over a WebRTC `DataChannel`
 
 The `producer` / `consumer` flow is the main demo for running across two different devices.
+
+## Text-Only Producer/Consumer
+
+`text_producer` and `text_consumer` negotiate only a `DataChannel`. They do not create any media tracks, do not depend on GStreamer, and are the simplest binaries in the repo for plain text payloads.
+
+Run them like this:
+
+```bash
+./build/text_producer 8080 0.0.0.0 "hello" "from" "producer"
+./build/text_consumer ws://127.0.0.1:8080/
+```
+
+If no message arguments are provided, `text_producer` sends a small default sequence when the data channel opens.
+
+To keep enqueueing messages at runtime from the terminal, start the producer with `--interactive` or `--stdin`:
+
+```bash
+./build/text_producer 8080 0.0.0.0 --interactive "boot message"
+```
+
+Each line typed into stdin is queued by the producer and sent over the data channel as soon as it is available.
 
 ## What The Producer/Consumer Demo Does
 
@@ -219,11 +241,18 @@ Supported producer pipeline profiles:
 
 - `default`: current cross-platform camera pipeline using `avfvideosrc` on macOS or `autovideosrc` on Linux
 - `zed-appsink`: simple ZED camera path based on `zedsrc`, matching the plain `../gst-test/zed-gstreamer/scripts/linux/simple-fps_rendering.sh` source side and then feeding the existing encode/RTP/appsink chain
+- `zed-two-stream-appsink`: ZED two-output path that demuxes the camera feed into separate left and auxiliary RTP appsinks and publishes both as independent WebRTC video tracks
 
 Example:
 
 ```bash
 ./scripts/run_producer.sh 8080 0.0.0.0 zed-appsink
+```
+
+Two-stream example:
+
+```bash
+./scripts/run_producer.sh 8080 0.0.0.0 zed-two-stream-appsink
 ```
 
 On the consumer machine:
@@ -268,8 +297,10 @@ The page will:
 - receive the producer's SDP offer
 - create and send an SDP answer
 - exchange ICE candidates
-- attach the remote WebRTC video track to a `<video>` element
+- attach each remote WebRTC video track to its own `<video>` tile
 - log the incoming data channel messages
+
+With `zed-two-stream-appsink`, the browser viewer renders two remote video tiles, one per outbound producer track.
 
 To visualize the RTP mirrored by the consumer on the same machine, run:
 
