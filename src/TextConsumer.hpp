@@ -1,5 +1,6 @@
 #pragma once
 
+#include "WebSocketSignalTransport.hpp"
 #include "rtc/rtc.hpp"
 
 #include <memory>
@@ -11,29 +12,28 @@ namespace demo {
 
 class TextConsumer {
  public:
-  explicit TextConsumer(std::string websocket_url);
+  explicit TextConsumer(WebSocketSignalTransportConfig signaling_config);
 
   void wait() const;
+  uint16_t port() const;
+  bool isSignalingServer() const;
+  std::string signalingEndpoint() const;
 
  private:
   void setupPeerConnection();
-  void setupWebSocket();
-  void handleWebSocketMessage(const std::string& payload);
+  void setupSignalingTransport();
+  void handleSignalingMessage(const std::string& payload);
   void handleRemoteDescription(const rtc::Description& description);
   void handleRemoteCandidate(const rtc::Candidate& candidate);
-  void queueOrSendSignalingMessage(std::string payload);
-  void flushPendingSignalingMessages();
 
-  std::string websocket_url_;
   rtc::PeerConnection peer_connection_;
-  rtc::WebSocket websocket_;
+  WebSocketSignalTransport signaling_transport_;
 
   std::shared_ptr<rtc::DataChannel> data_channel_;
 
   mutable std::mutex mutex_;
   bool remote_description_set_ = false;
   std::vector<rtc::Candidate> pending_candidates_;
-  std::vector<std::string> pending_signaling_messages_;
 };
 
 }  // namespace demo

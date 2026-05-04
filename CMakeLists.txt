@@ -68,6 +68,7 @@ add_library(
   src/SignalingProtocol.cpp
   src/TextProducer.cpp
   src/TextConsumer.cpp
+  src/WebSocketSignalTransport.cpp
 )
 target_link_libraries(
   p2p_text_common
@@ -84,6 +85,7 @@ if(GSTREAMER_FOUND)
     src/Producer.cpp
     src/SignalingProtocol.cpp
     src/VideoPipeline.cpp
+    src/WebSocketSignalTransport.cpp
   )
   target_link_libraries(p2p_demo_common PUBLIC PkgConfig::GSTREAMER)
   target_link_libraries(

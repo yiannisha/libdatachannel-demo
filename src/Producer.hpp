@@ -1,42 +1,39 @@
 #pragma once
 
 #include "VideoPipeline.hpp"
+#include "WebSocketSignalTransport.hpp"
 #include "rtc/rtc.hpp"
 
 #include <memory>
 #include <mutex>
-#include <string>
 #include <vector>
 
 namespace demo {
 
 class Producer {
  public:
-  Producer(
-      uint16_t websocket_port,
-      std::string bind_address = "0.0.0.0",
-      VideoPipeline::Profile video_pipeline_profile = VideoPipeline::Profile::Default);
+  Producer(WebSocketSignalTransportConfig signaling_config,
+           VideoPipeline::Profile video_pipeline_profile =
+               VideoPipeline::Profile::Default);
 
   void wait();
   uint16_t port() const;
+  bool isSignalingServer() const;
+  std::string signalingEndpoint() const;
 
  private:
   void setupPeerConnection();
-  void setupWebSocketServer();
   void setupVideoTracks(VideoPipeline::Profile video_pipeline_profile);
-  void attachClient(const std::shared_ptr<rtc::WebSocket>& client);
-  void handleWebSocketMessage(const std::string& payload);
+  void setupSignalingTransport();
+  void handleSignalingMessage(const std::string& payload);
   void handleRemoteDescription(const rtc::Description& description);
   void handleRemoteCandidate(const rtc::Candidate& candidate);
   void startDataChannel();
-  void queueOrSendSignalingMessage(std::string payload);
-  void flushPendingSignalingMessages();
 
   rtc::PeerConnection peer_connection_;
-  rtc::WebSocketServer server_;
+  WebSocketSignalTransport signaling_transport_;
   VideoPipeline video_pipeline_;
 
-  std::shared_ptr<rtc::WebSocket> client_;
   std::shared_ptr<rtc::DataChannel> data_channel_;
   std::vector<std::shared_ptr<rtc::Track>> video_tracks_;
 
@@ -44,7 +41,6 @@ class Producer {
   bool remote_description_set_ = false;
   bool data_channel_started_ = false;
   std::vector<rtc::Candidate> pending_candidates_;
-  std::vector<std::string> pending_signaling_messages_;
 };
 
 }  // namespace demo

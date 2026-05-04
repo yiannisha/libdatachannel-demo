@@ -6,7 +6,9 @@ This repo contains two small C++ demos built on top of `libdatachannel`:
 - `producer` / `consumer`: a two-process demo where signaling happens over WebSocket and the actual payload moves over a WebRTC `DataChannel`
 - `text_producer` / `text_consumer`: a text-only two-process demo where signaling happens over WebSocket and only string messages move over a WebRTC `DataChannel`
 
-The `producer` / `consumer` flow is the main demo for running across two different devices.
+The `producer` / `consumer` flow is the main demo for running across two different devices. Producer/consumer now describe the media role only. Either side can be the WebSocket signaling server or the WebSocket signaling client.
+
+Connector processes retry automatically until the listener comes up. The default reconnect interval is `1000 ms`, and `--connect` mode accepts `--retry-ms <ms>` to override it.
 
 The repo also includes Stereolabs' `zed-gstreamer` project as a git submodule at `zed-gstreamer/` for building the `zedsrc` plugin stack locally.
 
@@ -18,7 +20,14 @@ Run them like this:
 
 ```bash
 ./build/text_producer 8080 0.0.0.0 "hello" "from" "producer"
-./build/text_consumer ws://127.0.0.1:8080/
+./build/text_consumer 127.0.0.1 8080
+```
+
+Or invert the signaling direction:
+
+```bash
+./build/text_consumer --listen 8080
+./build/text_producer --connect 127.0.0.1 8080 --retry-ms 500 "hello" "from" "producer"
 ```
 
 If no message arguments are provided, `text_producer` sends a small default sequence when the data channel opens.
@@ -36,8 +45,7 @@ Each line typed into stdin is queued by the producer and sent over the data chan
 `Producer`:
 
 - creates an `rtc::PeerConnection`
-- starts a WebSocket signaling server
-- accepts exactly one WebSocket client
+- can either listen for one signaling WebSocket client or connect to a remote signaling WebSocket server
 - starts a local GStreamer camera pipeline
 - captures camera frames
 - encodes them with `x264enc`
@@ -50,7 +58,7 @@ Each line typed into stdin is queued by the producer and sent over the data chan
 `Consumer`:
 
 - creates its own `rtc::PeerConnection`
-- connects to the producer's WebSocket signaling server
+- can either listen for one signaling WebSocket client or connect to a remote signaling WebSocket server
 - receives the incoming H.264 video track with `onTrack(...)`
 - logs RTP packets received on that track
 - mirrors received RTP packets to a local UDP debug probe on `127.0.0.1:5004`
@@ -63,7 +71,7 @@ The current video path is:
 
 - laptop camera -> GStreamer -> H.264 encode -> RTP packetize -> `appsink` -> `rtc::Track`
 
-There is also a minimal browser viewer in [browser-viewer/index.html](browser-viewer/index.html) that can connect directly to the producer's WebSocket signaling server and render the remote WebRTC video track in a browser.
+There is also a minimal browser viewer in [browser-viewer/index.html](browser-viewer/index.html) that can connect directly to a signaling WebSocket endpoint and render the remote WebRTC video track in a browser. In practice that viewer is most useful when the producer is the signaling server.
 
 ## Signaling Protocol
 
@@ -289,10 +297,17 @@ This repo's `zed-appsink` and `zed-two-stream-appsink` profiles also assume NVID
 
 ### Cross-device Producer/Consumer Demo
 
-On the producer machine:
+The signaling role is configurable:
+
+- `producer --listen ...` and `consumer --connect ...`: the original flow
+- `consumer --listen ...` and `producer --connect ...`: inverted signaling flow
+
+The scripts now pass arguments through directly, so you can use either style.
+
+Original flow, on the producer machine:
 
 ```bash
-./scripts/run_producer.sh 8080 0.0.0.0
+./scripts/run_producer.sh --listen 8080 0.0.0.0
 ```
 
 When the producer starts, it also starts this GStreamer pipeline:
@@ -313,9 +328,9 @@ So you should see RTP packet logs even before a consumer connects, and once the 
 
 Arguments:
 
-- first argument: WebSocket server port, default `8080`
-- second argument: bind address, default `0.0.0.0`
-- third argument: video pipeline profile, default `default`
+- `--listen <port> [bind_address] [pipeline_profile]`
+- `--connect <host> <port> [--retry-ms <ms>] [pipeline_profile]`
+- legacy positional `producer [port] [bind_address] [pipeline_profile]` still maps to `--listen`
 
 Supported producer pipeline profiles:
 
@@ -328,32 +343,50 @@ If `zedsrc` is missing, see [Installing `zedsrc`](#installing-zedsrc) above befo
 Example:
 
 ```bash
-./scripts/run_producer.sh 8080 0.0.0.0 zed-appsink
+./scripts/run_producer.sh --listen 8080 0.0.0.0 zed-appsink
 ```
 
 Two-stream example:
 
 ```bash
-./scripts/run_producer.sh 8080 0.0.0.0 zed-two-stream-appsink
+./scripts/run_producer.sh --listen 8080 0.0.0.0 zed-two-stream-appsink
 ```
 
-On the consumer machine:
+Original flow, on the consumer machine:
 
 ```bash
-./scripts/run_consumer.sh ws://PRODUCER_HOST_OR_IP:8080/
+./scripts/run_consumer.sh --connect PRODUCER_HOST_OR_IP 8080
 ```
 
 Example:
 
 ```bash
-./scripts/run_consumer.sh ws://192.168.1.50:8080/
+./scripts/run_consumer.sh --connect 192.168.1.50 8080
+```
+
+With a custom reconnect interval:
+
+```bash
+./scripts/run_consumer.sh --connect 192.168.1.50 8080 --retry-ms 500
+```
+
+Inverted flow, on the consumer machine:
+
+```bash
+./scripts/run_consumer.sh --listen 8080 0.0.0.0
+```
+
+Then on the producer machine:
+
+```bash
+./scripts/run_producer.sh --connect CONSUMER_HOST_OR_IP 8080
 ```
 
 ### Browser Viewer
 
 You can also view the producer's WebRTC video directly in a browser:
 
-1. Start the producer.
+1. Start the producer in `--listen` mode.
 2. Open [browser-viewer/index.html](browser-viewer/index.html) in a browser, or serve the repo over HTTP:
 
 ```bash
@@ -447,6 +480,7 @@ Consumer:
 
 ```text
 consumer UDP debug probe forwarding RTP to 127.0.0.1:5004
+consumer websocket client targeting ws://PRODUCER_HOST_OR_IP:8080/
 consumer websocket connected to ws://PRODUCER_HOST_OR_IP:8080/
 consumer accepted track: mid=video direction=recvonly
 consumer generated local description
@@ -461,10 +495,11 @@ consumer received on data channel: third message from producer
 
 ## Files
 
-- [src/Producer.hpp](src/Producer.hpp) / [src/Producer.cpp](src/Producer.cpp): producer role and WebSocket server signaling
-- [src/Consumer.hpp](src/Consumer.hpp) / [src/Consumer.cpp](src/Consumer.cpp): consumer role and WebSocket client signaling
+- [src/Producer.hpp](src/Producer.hpp) / [src/Producer.cpp](src/Producer.cpp): producer media role with configurable signaling direction
+- [src/Consumer.hpp](src/Consumer.hpp) / [src/Consumer.cpp](src/Consumer.cpp): consumer media role with configurable signaling direction
 - [src/VideoPipeline.hpp](src/VideoPipeline.hpp) / [src/VideoPipeline.cpp](src/VideoPipeline.cpp): GStreamer camera pipeline that captures frames into an `appsink`
 - [src/SignalingProtocol.hpp](src/SignalingProtocol.hpp) / [src/SignalingProtocol.cpp](src/SignalingProtocol.cpp): JSON signaling schema and parsing helpers
+- [src/WebSocketSignalTransport.hpp](src/WebSocketSignalTransport.hpp) / [src/WebSocketSignalTransport.cpp](src/WebSocketSignalTransport.cpp): shared signaling transport that can act as either a WebSocket server or client
 - [src/producer_main.cpp](src/producer_main.cpp): producer executable entrypoint
 - [src/consumer_main.cpp](src/consumer_main.cpp): consumer executable entrypoint
 - [browser-viewer/index.html](browser-viewer/index.html): minimal browser-based WebRTC viewer
@@ -472,7 +507,7 @@ consumer received on data channel: third message from producer
 
 ## Current Limitations
 
-- The producer accepts only one signaling WebSocket client.
+- Each signaling server accepts only one signaling WebSocket client.
 - The demo uses a public STUN server but does not use TURN.
 - Across restrictive NATs or firewalls, peer-to-peer connectivity may fail.
 - The producer currently forwards RTP packets directly from GStreamer into the WebRTC track.
@@ -480,6 +515,7 @@ consumer received on data channel: third message from producer
   There is not yet a receiver-side decoder or player in this repo.
 - The consumer's UDP debug probe is local only.
   It mirrors packets to `127.0.0.1:5004` for debugging and local visualization.
+- The browser viewer currently assumes it is the answering side, so it is only compatible with runs where the producer acts as signaling server.
 - The signaling JSON schema only carries `command` and `description`.
   SDP type is inferred from local signaling state rather than sent explicitly.
   ICE `mid` is not sent separately.

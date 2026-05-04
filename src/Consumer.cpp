@@ -34,12 +34,13 @@ std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message)
 
 }  // namespace
 
-Consumer::Consumer(std::string websocket_url)
-    : websocket_url_(std::move(websocket_url)),
-      peer_connection_(makePeerConfiguration()) {
+Consumer::Consumer(WebSocketSignalTransportConfig signaling_config)
+    : peer_connection_(makePeerConfiguration()),
+      signaling_transport_(std::move(signaling_config)) {
   setupUdpProbe();
   setupPeerConnection();
-  setupWebSocket();
+  setupSignalingTransport();
+  signaling_transport_.start();
 }
 
 Consumer::~Consumer() {
@@ -52,6 +53,18 @@ void Consumer::wait() const {
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+}
+
+uint16_t Consumer::port() const {
+  return signaling_transport_.port();
+}
+
+bool Consumer::isSignalingServer() const {
+  return signaling_transport_.isServer();
+}
+
+std::string Consumer::signalingEndpoint() const {
+  return signaling_transport_.endpointDescription();
 }
 
 void Consumer::setupUdpProbe() {
@@ -81,12 +94,12 @@ void Consumer::setupPeerConnection() {
 
   peer_connection_.onLocalDescription([this](const rtc::Description& description) {
     std::cout << "consumer generated local description\n";
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalDescriptionMessage(description)));
   });
 
   peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 
@@ -149,33 +162,34 @@ void Consumer::setupPeerConnection() {
   });
 }
 
-void Consumer::setupWebSocket() {
-  websocket_.onOpen([this]() {
-    std::cout << "consumer websocket connected to " << websocket_url_ << '\n';
-    flushPendingSignalingMessages();
+void Consumer::setupSignalingTransport() {
+  signaling_transport_.setOnConnected([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "consumer signaling websocket client connected\n";
+    } else {
+      std::cout << "consumer websocket connected to "
+                << signaling_transport_.endpointDescription() << '\n';
+    }
   });
 
-  websocket_.onClosed([]() {
-    std::cout << "consumer websocket closed\n";
+  signaling_transport_.setOnClosed([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "consumer signaling websocket client disconnected\n";
+    } else {
+      std::cout << "consumer websocket closed\n";
+    }
   });
 
-  websocket_.onError([](const std::string& error) {
+  signaling_transport_.setOnError([](const std::string& error) {
     std::cerr << "consumer websocket error: " << error << '\n';
   });
 
-  websocket_.onMessage([this](const auto& message) {
-    if (!std::holds_alternative<rtc::string>(message)) {
-      std::cerr << "consumer received an unexpected binary websocket message\n";
-      return;
-    }
-
-    handleWebSocketMessage(std::get<rtc::string>(message));
+  signaling_transport_.setOnMessage([this](const std::string& payload) {
+    handleSignalingMessage(payload);
   });
-
-  websocket_.open(websocket_url_);
 }
 
-void Consumer::handleWebSocketMessage(const std::string& payload) {
+void Consumer::handleSignalingMessage(const std::string& payload) {
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
@@ -223,36 +237,6 @@ void Consumer::handleRemoteCandidate(const rtc::Candidate& candidate) {
 
   if (!should_queue) {
     peer_connection_.addRemoteCandidate(candidate);
-  }
-}
-
-void Consumer::queueOrSendSignalingMessage(std::string payload) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!websocket_.isOpen()) {
-    pending_signaling_messages_.push_back(std::move(payload));
-    return;
-  }
-
-  if (!websocket_.send(payload)) {
-    std::cerr << "consumer failed to send signaling message over websocket\n";
-  }
-}
-
-void Consumer::flushPendingSignalingMessages() {
-  std::vector<std::string> pending_messages;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!websocket_.isOpen()) {
-      return;
-    }
-
-    pending_messages.swap(pending_signaling_messages_);
-  }
-
-  for (auto& payload : pending_messages) {
-    if (!websocket_.send(payload)) {
-      std::cerr << "consumer failed to flush signaling message over websocket\n";
-    }
   }
 }
 
