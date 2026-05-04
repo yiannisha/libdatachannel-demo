@@ -76,20 +76,15 @@ std::vector<std::string> makeDefaultMessages() {
 
 }  // namespace
 
-TextProducer::TextProducer(uint16_t websocket_port,
-                           std::string bind_address,
+TextProducer::TextProducer(WebSocketSignalTransportConfig signaling_config,
                            std::vector<std::string> messages)
     : peer_connection_(makePeerConfiguration()),
-      server_([&]() {
-        rtc::WebSocketServer::Configuration config;
-        config.port = websocket_port;
-        config.bindAddress = std::move(bind_address);
-        return config;
-      }()) {
+      signaling_transport_(std::move(signaling_config)) {
   pending_data_channel_messages_ =
       messages.empty() ? makeDefaultMessages() : std::move(messages);
   setupPeerConnection();
-  setupWebSocketServer();
+  setupSignalingTransport();
+  signaling_transport_.start();
 }
 
 void TextProducer::enqueueMessage(std::string message) {
@@ -117,7 +112,15 @@ void TextProducer::wait() const {
 }
 
 uint16_t TextProducer::port() const {
-  return server_.port();
+  return signaling_transport_.port();
+}
+
+bool TextProducer::isSignalingServer() const {
+  return signaling_transport_.isServer();
+}
+
+std::string TextProducer::signalingEndpoint() const {
+  return signaling_transport_.endpointDescription();
 }
 
 void TextProducer::setupPeerConnection() {
@@ -131,56 +134,46 @@ void TextProducer::setupPeerConnection() {
 
   peer_connection_.onLocalDescription([this](const rtc::Description& description) {
     std::cout << "text producer generated local description\n";
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalDescriptionMessage(description)));
   });
 
   peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 }
 
-void TextProducer::setupWebSocketServer() {
-  server_.onClient([this](std::shared_ptr<rtc::WebSocket> client) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (client_ && !client_->isClosed()) {
-      std::cerr << "text producer rejected an extra websocket client\n";
-      client->close();
-      return;
+void TextProducer::setupSignalingTransport() {
+  signaling_transport_.setOnConnected([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "text producer signaling websocket client connected\n";
+    } else {
+      std::cout << "text producer signaling websocket connected to "
+                << signaling_transport_.endpointDescription() << '\n';
     }
 
-    client_ = std::move(client);
-    attachClient(client_);
-  });
-}
-
-void TextProducer::attachClient(const std::shared_ptr<rtc::WebSocket>& client) {
-  client->onOpen([this]() {
-    std::cout << "text producer websocket client connected\n";
-    flushPendingSignalingMessages();
     startDataChannel();
   });
 
-  client->onClosed([this]() {
-    std::cout << "text producer websocket client disconnected\n";
+  signaling_transport_.setOnClosed([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "text producer signaling websocket client disconnected\n";
+    } else {
+      std::cout << "text producer websocket closed\n";
+    }
   });
 
-  client->onError([](const std::string& error) {
+  signaling_transport_.setOnError([](const std::string& error) {
     std::cerr << "text producer websocket error: " << error << '\n';
   });
 
-  client->onMessage([this](const auto& message) {
-    if (!std::holds_alternative<rtc::string>(message)) {
-      std::cerr << "text producer received an unexpected binary websocket message\n";
-      return;
-    }
-
-    handleWebSocketMessage(std::get<rtc::string>(message));
+  signaling_transport_.setOnMessage([this](const std::string& payload) {
+    handleSignalingMessage(payload);
   });
 }
 
-void TextProducer::handleWebSocketMessage(const std::string& payload) {
+void TextProducer::handleSignalingMessage(const std::string& payload) {
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
@@ -279,43 +272,6 @@ void TextProducer::flushPendingDataChannelMessages() {
     if (!sendTextMessage(channel, message)) {
       std::cerr << "text producer failed to flush queued data channel message\n";
       return;
-    }
-  }
-}
-
-void TextProducer::queueOrSendSignalingMessage(std::string payload) {
-  std::shared_ptr<rtc::WebSocket> client;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!client_ || !client_->isOpen()) {
-      pending_signaling_messages_.push_back(std::move(payload));
-      return;
-    }
-
-    client = client_;
-  }
-
-  if (!client->send(payload)) {
-    std::cerr << "text producer failed to send signaling message over websocket\n";
-  }
-}
-
-void TextProducer::flushPendingSignalingMessages() {
-  std::shared_ptr<rtc::WebSocket> client;
-  std::vector<std::string> pending_messages;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!client_ || !client_->isOpen()) {
-      return;
-    }
-
-    client = client_;
-    pending_messages.swap(pending_signaling_messages_);
-  }
-
-  for (auto& payload : pending_messages) {
-    if (!client->send(payload)) {
-      std::cerr << "text producer failed to flush signaling message over websocket\n";
     }
   }
 }

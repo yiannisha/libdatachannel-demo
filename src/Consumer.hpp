@@ -1,5 +1,6 @@
 #pragma once
 
+#include "WebSocketSignalTransport.hpp"
 #include "rtc/rtc.hpp"
 
 #include <netinet/in.h>
@@ -14,25 +15,25 @@ namespace demo {
 
 class Consumer {
  public:
-  explicit Consumer(std::string websocket_url);
+  explicit Consumer(WebSocketSignalTransportConfig signaling_config);
   ~Consumer();
 
   void wait() const;
+  uint16_t port() const;
+  bool isSignalingServer() const;
+  std::string signalingEndpoint() const;
 
  private:
   void setupUdpProbe();
   void setupPeerConnection();
-  void setupWebSocket();
-  void handleWebSocketMessage(const std::string& payload);
+  void setupSignalingTransport();
+  void handleSignalingMessage(const std::string& payload);
   void handleRemoteDescription(const rtc::Description& description);
   void handleRemoteCandidate(const rtc::Candidate& candidate);
-  void queueOrSendSignalingMessage(std::string payload);
-  void flushPendingSignalingMessages();
   void mirrorRtpToUdpProbe(const rtc::binary& packet) const;
 
-  std::string websocket_url_;
   rtc::PeerConnection peer_connection_;
-  rtc::WebSocket websocket_;
+  WebSocketSignalTransport signaling_transport_;
 
   std::shared_ptr<rtc::DataChannel> data_channel_;
   std::vector<std::shared_ptr<rtc::Track>> tracks_;
@@ -40,7 +41,6 @@ class Consumer {
   mutable std::mutex mutex_;
   bool remote_description_set_ = false;
   std::vector<rtc::Candidate> pending_candidates_;
-  std::vector<std::string> pending_signaling_messages_;
 
   int udp_probe_fd_ = -1;
   sockaddr_in udp_probe_dst_ = {};

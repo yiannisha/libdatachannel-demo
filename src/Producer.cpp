@@ -101,23 +101,18 @@ std::vector<VideoPipeline::TrackBinding> makeTrackBindings(
 
 }  // namespace
 
-Producer::Producer(uint16_t websocket_port,
-                   std::string bind_address,
+Producer::Producer(WebSocketSignalTransportConfig signaling_config,
                    VideoPipeline::Profile video_pipeline_profile)
     : peer_connection_(makePeerConfiguration()),
-      server_([&]() {
-        rtc::WebSocketServer::Configuration config;
-        config.port = websocket_port;
-        config.bindAddress = std::move(bind_address);
-        return config;
-      }()),
+      signaling_transport_(std::move(signaling_config)),
       video_pipeline_(video_pipeline_profile) {
   setupPeerConnection();
   setupVideoTracks(video_pipeline_profile);
   video_pipeline_.setTrackBindings(
       makeTrackBindings(makeVideoTrackSpecs(video_pipeline_profile), video_tracks_));
   video_pipeline_.start();
-  setupWebSocketServer();
+  setupSignalingTransport();
+  signaling_transport_.start();
 }
 
 void Producer::wait() {
@@ -127,7 +122,15 @@ void Producer::wait() {
 }
 
 uint16_t Producer::port() const {
-  return server_.port();
+  return signaling_transport_.port();
+}
+
+bool Producer::isSignalingServer() const {
+  return signaling_transport_.isServer();
+}
+
+std::string Producer::signalingEndpoint() const {
+  return signaling_transport_.endpointDescription();
 }
 
 void Producer::setupPeerConnection() {
@@ -141,12 +144,12 @@ void Producer::setupPeerConnection() {
 
   peer_connection_.onLocalDescription([this](const rtc::Description& description) {
     std::cout << "producer generated local description\n";
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalDescriptionMessage(description)));
   });
 
   peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
-    queueOrSendSignalingMessage(
+    signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 }
@@ -176,46 +179,36 @@ void Producer::setupVideoTracks(VideoPipeline::Profile video_pipeline_profile) {
   }
 }
 
-void Producer::setupWebSocketServer() {
-  server_.onClient([this](std::shared_ptr<rtc::WebSocket> client) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (client_ && !client_->isClosed()) {
-      std::cerr << "producer rejected an extra websocket client\n";
-      client->close();
-      return;
+void Producer::setupSignalingTransport() {
+  signaling_transport_.setOnConnected([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "producer signaling websocket client connected\n";
+    } else {
+      std::cout << "producer signaling websocket connected to "
+                << signaling_transport_.endpointDescription() << '\n';
     }
 
-    client_ = std::move(client);
-    attachClient(client_);
-  });
-}
-
-void Producer::attachClient(const std::shared_ptr<rtc::WebSocket>& client) {
-  client->onOpen([this]() {
-    std::cout << "producer websocket client connected\n";
-    flushPendingSignalingMessages();
     startDataChannel();
   });
 
-  client->onClosed([this]() {
-    std::cout << "producer websocket client disconnected\n";
+  signaling_transport_.setOnClosed([this]() {
+    if (signaling_transport_.isServer()) {
+      std::cout << "producer signaling websocket client disconnected\n";
+    } else {
+      std::cout << "producer signaling websocket closed\n";
+    }
   });
 
-  client->onError([](const std::string& error) {
+  signaling_transport_.setOnError([](const std::string& error) {
     std::cerr << "producer websocket error: " << error << '\n';
   });
 
-  client->onMessage([this](const auto& message) {
-    if (!std::holds_alternative<rtc::string>(message)) {
-      std::cerr << "producer received an unexpected binary websocket message\n";
-      return;
-    }
-
-    handleWebSocketMessage(std::get<rtc::string>(message));
+  signaling_transport_.setOnMessage([this](const std::string& payload) {
+    handleSignalingMessage(payload);
   });
 }
 
-void Producer::handleWebSocketMessage(const std::string& payload) {
+void Producer::handleSignalingMessage(const std::string& payload) {
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
@@ -288,43 +281,6 @@ void Producer::startDataChannel() {
   data_channel_->onMessage([](const auto& message) {
     std::cout << "producer received on data channel: " << formatMessage(message) << '\n';
   });
-}
-
-void Producer::queueOrSendSignalingMessage(std::string payload) {
-  std::shared_ptr<rtc::WebSocket> client;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!client_ || !client_->isOpen()) {
-      pending_signaling_messages_.push_back(std::move(payload));
-      return;
-    }
-
-    client = client_;
-  }
-
-  if (!client->send(payload)) {
-    std::cerr << "producer failed to send signaling message over websocket\n";
-  }
-}
-
-void Producer::flushPendingSignalingMessages() {
-  std::shared_ptr<rtc::WebSocket> client;
-  std::vector<std::string> pending_messages;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!client_ || !client_->isOpen()) {
-      return;
-    }
-
-    client = client_;
-    pending_messages.swap(pending_signaling_messages_);
-  }
-
-  for (auto& payload : pending_messages) {
-    if (!client->send(payload)) {
-      std::cerr << "producer failed to flush signaling message over websocket\n";
-    }
-  }
 }
 
 }  // namespace demo
