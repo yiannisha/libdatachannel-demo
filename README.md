@@ -8,6 +8,8 @@ This repo contains two small C++ demos built on top of `libdatachannel`:
 
 The `producer` / `consumer` flow is the main demo for running across two different devices.
 
+The repo also includes Stereolabs' `zed-gstreamer` project as a git submodule at `zed-gstreamer/` for building the `zedsrc` plugin stack locally.
+
 ## Text-Only Producer/Consumer
 
 `text_producer` and `text_consumer` negotiate only a `DataChannel`. They do not create any media tracks, do not depend on GStreamer, and are the simplest binaries in the repo for plain text payloads.
@@ -176,6 +178,18 @@ sudo pacman -S --needed \
 
 ## Build
 
+If you cloned this repo without submodules, initialize them first:
+
+```bash
+git submodule update --init --recursive
+```
+
+For a fresh clone, prefer:
+
+```bash
+git clone --recurse-submodules <your-repo-url>
+```
+
 ```bash
 cmake -S . -B build
 cmake --build build
@@ -204,6 +218,72 @@ At runtime, the producer also requires these GStreamer elements:
 - `x264enc`
 - `h264parse`
 - `rtph264pay`
+
+For the ZED pipeline profiles, `zedsrc` is not part of the normal GStreamer packages above. It comes from Stereolabs' separate `zed-gstreamer` plugins.
+
+### Installing `zedsrc`
+
+If `gst-inspect-1.0 zedsrc` prints `No such element or plugin 'zedsrc'`, install the ZED GStreamer plugin stack:
+
+1. Install the latest ZED SDK from Stereolabs.
+2. Install the extra GStreamer development packages and tools:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential \
+  cmake \
+  git \
+  libgstreamer1.0-0 \
+  gstreamer1.0-libav \
+  libgstrtspserver-1.0-0 \
+  gstreamer1.0-tools \
+  gstreamer1.0-x \
+  gstreamer1.0-alsa \
+  gstreamer1.0-gl \
+  gstreamer1.0-gtk3 \
+  gstreamer1.0-qt5 \
+  gstreamer1.0-pulseaudio \
+  libgstreamer1.0-dev \
+  libgstrtspserver-1.0-dev \
+  libgstreamer-plugins-base1.0-0 \
+  libgstreamer-plugins-base1.0-dev \
+  libgstreamer-plugins-good1.0-0 \
+  libgstreamer-plugins-good1.0-dev \
+  libgstreamer-plugins-bad1.0-0 \
+  libgstreamer-plugins-bad1.0-dev
+```
+
+3. Build and install the bundled `zed-gstreamer` submodule:
+
+```bash
+git submodule update --init --recursive
+cd zed-gstreamer
+mkdir -p build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make
+sudo make install
+```
+
+If you need to add the submodule to another clone of this repo manually, the command that worked here was:
+
+```bash
+git submodule add --force https://github.com/stereolabs/zed-gstreamer.git zed-gstreamer
+```
+
+4. Verify the plugin is visible to GStreamer:
+
+```bash
+gst-inspect-1.0 zedsrc
+gst-inspect-1.0 zeddemux
+```
+
+Official Stereolabs guide:
+
+- https://www.stereolabs.com/docs/gstreamer
+
+This repo's `zed-appsink` and `zed-two-stream-appsink` profiles also assume NVIDIA Jetson-style GStreamer elements such as `nvvidconv` and `nvv4l2h264enc`, so having only `zedsrc` installed is not enough on a non-Jetson machine.
 
 ## Run
 
@@ -240,8 +320,10 @@ Arguments:
 Supported producer pipeline profiles:
 
 - `default`: current cross-platform camera pipeline using `avfvideosrc` on macOS or `autovideosrc` on Linux
-- `zed-appsink`: simple ZED camera path based on `zedsrc`, matching the plain `../gst-test/zed-gstreamer/scripts/linux/simple-fps_rendering.sh` source side and then feeding the existing encode/RTP/appsink chain
+- `zed-appsink`: simple ZED camera path based on `zedsrc`, matching the plain `zed-gstreamer/scripts/linux/simple-fps_rendering.sh` source side and then feeding the existing encode/RTP/appsink chain
 - `zed-two-stream-appsink`: ZED two-output path that demuxes the camera feed into separate left and auxiliary RTP appsinks and publishes both as independent WebRTC video tracks
+
+If `zedsrc` is missing, see [Installing `zedsrc`](#installing-zedsrc) above before using either `zed-*` profile.
 
 Example:
 

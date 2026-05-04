@@ -1,0 +1,3 @@
+[submodule "zed-gstreamer"]
+	path = zed-gstreamer
+	url = https://github.com/stereolabs/zed-gstreamer.git
