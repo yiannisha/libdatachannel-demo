@@ -12,22 +12,25 @@
 namespace demo {
 
 class TextProducer {
- public:
+public:
   TextProducer(WebSocketSignalTransportConfig signaling_config,
-               std::vector<std::string> messages = {});
+               std::vector<std::string> messages = {},
+               bool use_default_messages = true,
+               std::string data_channel_label = "text-demo");
 
   void enqueueMessage(std::string message);
+  bool sendMessageIfOpen(const std::string &message);
   void wait() const;
   uint16_t port() const;
   bool isSignalingServer() const;
   std::string signalingEndpoint() const;
 
- private:
+private:
   void setupPeerConnection();
   void setupSignalingTransport();
-  void handleSignalingMessage(const std::string& payload);
-  void handleRemoteDescription(const rtc::Description& description);
-  void handleRemoteCandidate(const rtc::Candidate& candidate);
+  void handleSignalingMessage(const std::string &payload);
+  void handleRemoteDescription(const rtc::Description &description);
+  void handleRemoteCandidate(const rtc::Candidate &candidate);
   void startDataChannel();
   void flushPendingDataChannelMessages();
 
@@ -40,8 +43,9 @@ class TextProducer {
   bool remote_description_set_ = false;
   bool data_channel_started_ = false;
   bool data_channel_open_ = false;
+  std::string data_channel_label_;
   std::vector<rtc::Candidate> pending_candidates_;
   std::vector<std::string> pending_data_channel_messages_;
 };
 
-}  // namespace demo
+} // namespace demo

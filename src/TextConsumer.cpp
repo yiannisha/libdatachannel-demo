@@ -21,7 +21,8 @@ rtc::Configuration makePeerConfiguration() {
   return config;
 }
 
-std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message) {
+std::string
+formatMessage(const std::variant<rtc::binary, rtc::string> &message) {
   if (std::holds_alternative<rtc::string>(message)) {
     return std::get<rtc::string>(message);
   }
@@ -46,7 +47,7 @@ std::string formatTimestamp(Clock::time_point time_point) {
   return stream.str();
 }
 
-std::string formatReceivedTextMessage(const std::string& payload) {
+std::string formatReceivedTextMessage(const std::string &payload) {
   constexpr std::string_view prefix = "__text_demo_sent_at_ms=";
   const std::size_t separator = payload.find(';');
   if (payload.compare(0, prefix.size(), prefix.data()) != 0 ||
@@ -55,27 +56,42 @@ std::string formatReceivedTextMessage(const std::string& payload) {
   }
 
   try {
-    const auto sent_at_ms = std::stoll(
-        payload.substr(prefix.size(), separator - prefix.size()));
-    const auto sent_at = Clock::time_point(std::chrono::milliseconds(sent_at_ms));
+    const auto sent_at_ms =
+        std::stoll(payload.substr(prefix.size(), separator - prefix.size()));
+    const auto sent_at =
+        Clock::time_point(std::chrono::milliseconds(sent_at_ms));
     const Clock::time_point received_at = Clock::now();
     const std::string message = payload.substr(separator + 1);
 
     std::ostringstream stream;
     stream << "text consumer received at " << formatTimestamp(received_at)
-           << " (producer sent at " << formatTimestamp(sent_at) << "): "
-           << message;
+           << " (producer sent at " << formatTimestamp(sent_at)
+           << "): " << message;
     return stream.str();
-  } catch (const std::exception&) {
+  } catch (const std::exception &) {
     return payload;
   }
 }
 
-}  // namespace
+std::string decodeTextMessagePayload(const std::string &payload) {
+  constexpr std::string_view prefix = "__text_demo_sent_at_ms=";
+  const std::size_t separator = payload.find(';');
+  if (payload.compare(0, prefix.size(), prefix.data()) != 0 ||
+      separator == std::string::npos) {
+    return payload;
+  }
 
-TextConsumer::TextConsumer(WebSocketSignalTransportConfig signaling_config)
+  return payload.substr(separator + 1);
+}
+
+} // namespace
+
+TextConsumer::TextConsumer(
+    WebSocketSignalTransportConfig signaling_config,
+    std::function<void(const std::string &)> on_text_message)
     : peer_connection_(makePeerConfiguration()),
-      signaling_transport_(std::move(signaling_config)) {
+      signaling_transport_(std::move(signaling_config)),
+      on_text_message_(std::move(on_text_message)) {
   setupPeerConnection();
   setupSignalingTransport();
   signaling_transport_.start();
@@ -87,9 +103,7 @@ void TextConsumer::wait() const {
   }
 }
 
-uint16_t TextConsumer::port() const {
-  return signaling_transport_.port();
-}
+uint16_t TextConsumer::port() const { return signaling_transport_.port(); }
 
 bool TextConsumer::isSignalingServer() const {
   return signaling_transport_.isServer();
@@ -104,44 +118,52 @@ void TextConsumer::setupPeerConnection() {
     std::cout << "text consumer peer state: " << state << '\n';
   });
 
-  peer_connection_.onGatheringStateChange([](rtc::PeerConnection::GatheringState state) {
-    std::cout << "text consumer gathering state: " << state << '\n';
-  });
+  peer_connection_.onGatheringStateChange(
+      [](rtc::PeerConnection::GatheringState state) {
+        std::cout << "text consumer gathering state: " << state << '\n';
+      });
 
-  peer_connection_.onLocalDescription([this](const rtc::Description& description) {
-    std::cout << "text consumer generated local description\n";
-    signaling_transport_.send(
-        serializeSignalingMessage(makeLocalDescriptionMessage(description)));
-  });
+  peer_connection_.onLocalDescription(
+      [this](const rtc::Description &description) {
+        std::cout << "text consumer generated local description\n";
+        signaling_transport_.send(serializeSignalingMessage(
+            makeLocalDescriptionMessage(description)));
+      });
 
-  peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
+  peer_connection_.onLocalCandidate([this](const rtc::Candidate &candidate) {
     signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 
-  peer_connection_.onDataChannel([this](const std::shared_ptr<rtc::DataChannel>& channel) {
-    data_channel_ = channel;
-    std::cout << "text consumer accepted data channel: " << channel->label() << '\n';
+  peer_connection_.onDataChannel(
+      [this](const std::shared_ptr<rtc::DataChannel> &channel) {
+        data_channel_ = channel;
+        std::cout << "text consumer accepted data channel: " << channel->label()
+                  << '\n';
 
-    data_channel_->onOpen([channel]() {
-      std::cout << "text consumer data channel open (" << channel->label() << ")\n";
-      channel->send("ack from text consumer");
-    });
+        data_channel_->onOpen([channel]() {
+          std::cout << "text consumer data channel open (" << channel->label()
+                    << ")\n";
+          channel->send("ack from text consumer");
+        });
 
-    data_channel_->onClosed([]() {
-      std::cout << "text consumer data channel closed\n";
-    });
+        data_channel_->onClosed(
+            []() { std::cout << "text consumer data channel closed\n"; });
 
-    data_channel_->onMessage([](const auto& message) {
-      if (std::holds_alternative<rtc::string>(message)) {
-        std::cout << formatReceivedTextMessage(std::get<rtc::string>(message)) << '\n';
-        return;
-      }
+        data_channel_->onMessage([this](const auto &message) {
+          if (std::holds_alternative<rtc::string>(message)) {
+            const std::string &payload = std::get<rtc::string>(message);
+            std::cout << formatReceivedTextMessage(payload) << '\n';
+            if (on_text_message_) {
+              on_text_message_(decodeTextMessagePayload(payload));
+            }
+            return;
+          }
 
-      std::cout << "text consumer received on data channel: "
-                << formatMessage(message) << '\n';
-    });
-  });
+          std::cout << "text consumer received on data channel: "
+                    << formatMessage(message) << '\n';
+        });
+      });
 }
 
 void TextConsumer::setupSignalingTransport() {
@@ -162,34 +184,34 @@ void TextConsumer::setupSignalingTransport() {
     }
   });
 
-  signaling_transport_.setOnError([](const std::string& error) {
+  signaling_transport_.setOnError([](const std::string &error) {
     std::cerr << "text consumer websocket error: " << error << '\n';
   });
 
-  signaling_transport_.setOnMessage([this](const std::string& payload) {
-    handleSignalingMessage(payload);
-  });
+  signaling_transport_.setOnMessage(
+      [this](const std::string &payload) { handleSignalingMessage(payload); });
 }
 
-void TextConsumer::handleSignalingMessage(const std::string& payload) {
+void TextConsumer::handleSignalingMessage(const std::string &payload) {
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
-      case SignalingCommand::LocalDescription:
-        handleRemoteDescription(
-            parseRemoteDescription(message, peer_connection_.signalingState()));
-        break;
-      case SignalingCommand::LocalCandidate:
-        handleRemoteCandidate(parseRemoteCandidate(message));
-        break;
+    case SignalingCommand::LocalDescription:
+      handleRemoteDescription(
+          parseRemoteDescription(message, peer_connection_.signalingState()));
+      break;
+    case SignalingCommand::LocalCandidate:
+      handleRemoteCandidate(parseRemoteCandidate(message));
+      break;
     }
-  } catch (const std::exception& error) {
+  } catch (const std::exception &error) {
     std::cerr << "text consumer failed to handle websocket message: "
               << error.what() << '\n';
   }
 }
 
-void TextConsumer::handleRemoteDescription(const rtc::Description& description) {
+void TextConsumer::handleRemoteDescription(
+    const rtc::Description &description) {
   peer_connection_.setRemoteDescription(description);
 
   std::vector<rtc::Candidate> pending_candidates;
@@ -199,12 +221,12 @@ void TextConsumer::handleRemoteDescription(const rtc::Description& description) 
     pending_candidates.swap(pending_candidates_);
   }
 
-  for (auto& candidate : pending_candidates) {
+  for (auto &candidate : pending_candidates) {
     peer_connection_.addRemoteCandidate(std::move(candidate));
   }
 }
 
-void TextConsumer::handleRemoteCandidate(const rtc::Candidate& candidate) {
+void TextConsumer::handleRemoteCandidate(const rtc::Candidate &candidate) {
   if (candidate.candidate().empty()) {
     return;
   }
@@ -223,4 +245,4 @@ void TextConsumer::handleRemoteCandidate(const rtc::Candidate& candidate) {
   }
 }
 
-}  // namespace demo
+} // namespace demo

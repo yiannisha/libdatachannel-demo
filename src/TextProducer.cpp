@@ -21,7 +21,8 @@ rtc::Configuration makePeerConfiguration() {
   return config;
 }
 
-std::string formatMessage(const std::variant<rtc::binary, rtc::string>& message) {
+std::string
+formatMessage(const std::variant<rtc::binary, rtc::string> &message) {
   if (std::holds_alternative<rtc::string>(message)) {
     return std::get<rtc::string>(message);
   }
@@ -46,23 +47,23 @@ std::string formatTimestamp(Clock::time_point time_point) {
   return stream.str();
 }
 
-std::string encodeMessagePayload(const std::string& body, Clock::time_point sent_at) {
-  const auto sent_at_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          sent_at.time_since_epoch())
-          .count();
+std::string encodeMessagePayload(const std::string &body,
+                                 Clock::time_point sent_at) {
+  const auto sent_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              sent_at.time_since_epoch())
+                              .count();
   return "__text_demo_sent_at_ms=" + std::to_string(sent_at_ms) + ';' + body;
 }
 
-bool sendTextMessage(const std::shared_ptr<rtc::DataChannel>& channel,
-                     const std::string& body) {
+bool sendTextMessage(const std::shared_ptr<rtc::DataChannel> &channel,
+                     const std::string &body) {
   const Clock::time_point sent_at = Clock::now();
   if (!channel->send(encodeMessagePayload(body, sent_at))) {
     return false;
   }
 
-  std::cout << "text producer sent at " << formatTimestamp(sent_at)
-            << ": " << body << '\n';
+  std::cout << "text producer sent at " << formatTimestamp(sent_at) << ": "
+            << body << '\n';
   return true;
 }
 
@@ -74,14 +75,22 @@ std::vector<std::string> makeDefaultMessages() {
   };
 }
 
-}  // namespace
+} // namespace
 
 TextProducer::TextProducer(WebSocketSignalTransportConfig signaling_config,
-                           std::vector<std::string> messages)
+                           std::vector<std::string> messages,
+                           bool use_default_messages,
+                           std::string data_channel_label)
     : peer_connection_(makePeerConfiguration()),
-      signaling_transport_(std::move(signaling_config)) {
-  pending_data_channel_messages_ =
-      messages.empty() ? makeDefaultMessages() : std::move(messages);
+      signaling_transport_(std::move(signaling_config)),
+      data_channel_label_(data_channel_label.empty()
+                              ? "text-demo"
+                              : std::move(data_channel_label)) {
+  if (messages.empty() && use_default_messages) {
+    pending_data_channel_messages_ = makeDefaultMessages();
+  } else {
+    pending_data_channel_messages_ = std::move(messages);
+  }
   setupPeerConnection();
   setupSignalingTransport();
   signaling_transport_.start();
@@ -100,9 +109,29 @@ void TextProducer::enqueueMessage(std::string message) {
   }
 
   if (!sendTextMessage(channel, message)) {
-    std::cerr << "text producer failed to send queued message over data channel\n";
+    std::cerr
+        << "text producer failed to send queued message over data channel\n";
     return;
   }
+}
+
+bool TextProducer::sendMessageIfOpen(const std::string &message) {
+  std::shared_ptr<rtc::DataChannel> channel;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!data_channel_ || !data_channel_open_) {
+      return false;
+    }
+
+    channel = data_channel_;
+  }
+
+  if (!sendTextMessage(channel, message)) {
+    std::cerr << "text producer failed to send message over data channel\n";
+    return false;
+  }
+
+  return true;
 }
 
 void TextProducer::wait() const {
@@ -111,9 +140,7 @@ void TextProducer::wait() const {
   }
 }
 
-uint16_t TextProducer::port() const {
-  return signaling_transport_.port();
-}
+uint16_t TextProducer::port() const { return signaling_transport_.port(); }
 
 bool TextProducer::isSignalingServer() const {
   return signaling_transport_.isServer();
@@ -128,17 +155,19 @@ void TextProducer::setupPeerConnection() {
     std::cout << "text producer peer state: " << state << '\n';
   });
 
-  peer_connection_.onGatheringStateChange([](rtc::PeerConnection::GatheringState state) {
-    std::cout << "text producer gathering state: " << state << '\n';
-  });
+  peer_connection_.onGatheringStateChange(
+      [](rtc::PeerConnection::GatheringState state) {
+        std::cout << "text producer gathering state: " << state << '\n';
+      });
 
-  peer_connection_.onLocalDescription([this](const rtc::Description& description) {
-    std::cout << "text producer generated local description\n";
-    signaling_transport_.send(
-        serializeSignalingMessage(makeLocalDescriptionMessage(description)));
-  });
+  peer_connection_.onLocalDescription(
+      [this](const rtc::Description &description) {
+        std::cout << "text producer generated local description\n";
+        signaling_transport_.send(serializeSignalingMessage(
+            makeLocalDescriptionMessage(description)));
+      });
 
-  peer_connection_.onLocalCandidate([this](const rtc::Candidate& candidate) {
+  peer_connection_.onLocalCandidate([this](const rtc::Candidate &candidate) {
     signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
@@ -164,34 +193,34 @@ void TextProducer::setupSignalingTransport() {
     }
   });
 
-  signaling_transport_.setOnError([](const std::string& error) {
+  signaling_transport_.setOnError([](const std::string &error) {
     std::cerr << "text producer websocket error: " << error << '\n';
   });
 
-  signaling_transport_.setOnMessage([this](const std::string& payload) {
-    handleSignalingMessage(payload);
-  });
+  signaling_transport_.setOnMessage(
+      [this](const std::string &payload) { handleSignalingMessage(payload); });
 }
 
-void TextProducer::handleSignalingMessage(const std::string& payload) {
+void TextProducer::handleSignalingMessage(const std::string &payload) {
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
-      case SignalingCommand::LocalDescription:
-        handleRemoteDescription(
-            parseRemoteDescription(message, peer_connection_.signalingState()));
-        break;
-      case SignalingCommand::LocalCandidate:
-        handleRemoteCandidate(parseRemoteCandidate(message));
-        break;
+    case SignalingCommand::LocalDescription:
+      handleRemoteDescription(
+          parseRemoteDescription(message, peer_connection_.signalingState()));
+      break;
+    case SignalingCommand::LocalCandidate:
+      handleRemoteCandidate(parseRemoteCandidate(message));
+      break;
     }
-  } catch (const std::exception& error) {
+  } catch (const std::exception &error) {
     std::cerr << "text producer failed to handle websocket message: "
               << error.what() << '\n';
   }
 }
 
-void TextProducer::handleRemoteDescription(const rtc::Description& description) {
+void TextProducer::handleRemoteDescription(
+    const rtc::Description &description) {
   peer_connection_.setRemoteDescription(description);
 
   std::vector<rtc::Candidate> pending_candidates;
@@ -201,12 +230,12 @@ void TextProducer::handleRemoteDescription(const rtc::Description& description) 
     pending_candidates.swap(pending_candidates_);
   }
 
-  for (auto& candidate : pending_candidates) {
+  for (auto &candidate : pending_candidates) {
     peer_connection_.addRemoteCandidate(std::move(candidate));
   }
 }
 
-void TextProducer::handleRemoteCandidate(const rtc::Candidate& candidate) {
+void TextProducer::handleRemoteCandidate(const rtc::Candidate &candidate) {
   if (candidate.candidate().empty()) {
     return;
   }
@@ -232,14 +261,15 @@ void TextProducer::startDataChannel() {
   }
 
   data_channel_started_ = true;
-  data_channel_ = peer_connection_.createDataChannel("text-demo");
+  data_channel_ = peer_connection_.createDataChannel(data_channel_label_);
   data_channel_->onOpen([this, channel = data_channel_]() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       data_channel_open_ = true;
     }
 
-    std::cout << "text producer data channel open (" << channel->label() << ")\n";
+    std::cout << "text producer data channel open (" << channel->label()
+              << ")\n";
     flushPendingDataChannelMessages();
   });
 
@@ -249,7 +279,7 @@ void TextProducer::startDataChannel() {
     std::cout << "text producer data channel closed\n";
   });
 
-  data_channel_->onMessage([](const auto& message) {
+  data_channel_->onMessage([](const auto &message) {
     std::cout << "text producer received on data channel: "
               << formatMessage(message) << '\n';
   });
@@ -268,12 +298,13 @@ void TextProducer::flushPendingDataChannelMessages() {
     pending_messages.swap(pending_data_channel_messages_);
   }
 
-  for (const std::string& message : pending_messages) {
+  for (const std::string &message : pending_messages) {
     if (!sendTextMessage(channel, message)) {
-      std::cerr << "text producer failed to flush queued data channel message\n";
+      std::cerr
+          << "text producer failed to flush queued data channel message\n";
       return;
     }
   }
 }
 
-}  // namespace demo
+} // namespace demo
