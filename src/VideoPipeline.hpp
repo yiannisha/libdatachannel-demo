@@ -25,6 +25,7 @@ class VideoPipeline {
     Default,
     ZedAppsink,
     ZedTwoStreamAppsink,
+    ZedXOneMonoAppsink,
   };
 
   explicit VideoPipeline(Profile profile = Profile::Default);

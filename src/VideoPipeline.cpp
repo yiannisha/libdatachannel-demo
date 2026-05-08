@@ -151,14 +151,14 @@ std::string makeZedAppsinkPipelineDescription() {
 }
 
 std::string makeZedTwoStreamAppsinkPipelineDescription() {
-  return "zedsrc stream-type=2 camera-resolution=2 camera-fps=30 ! "
+  return "zedsrc stream-type=2 camera-resolution=1 camera-fps=30 ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "zeddemux is-depth=false is-mono=false name=demux "
 
          "demux.src_left ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "videoconvert ! video/x-raw,format=RGBA ! "
-         "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+         "nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 ! "
          "nvv4l2h264enc "
            "maxperf-enable=1 "
            "preset-level=1 "
@@ -175,7 +175,7 @@ std::string makeZedTwoStreamAppsinkPipelineDescription() {
          "demux.src_aux ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "videoconvert ! video/x-raw,format=RGBA ! "
-         "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+         "nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 ! "
          "nvv4l2h264enc "
            "maxperf-enable=1 "
            "preset-level=1 "
@@ -190,6 +190,45 @@ std::string makeZedTwoStreamAppsinkPipelineDescription() {
          "appsink name=rtpsink_right emit-signals=true sync=false async=false max-buffers=1 drop=true wait-on-eos=false";
 }
 
+std::string makeZedXOneMonoAppsinkPipelineDescription() {
+  // ZED X One monocular pipeline. See
+  // https://www.stereolabs.com/docs/gstreamer/zedxone-camera-source for the
+  // available zedxonesrc properties (camera-resolution is an enum: 0=SVGA GS,
+  // 1=HD1080, 2=HD1200, 3=QHDPLUS 4K-only, 4=4K 4K-only; camera-fps is also
+  // an enum: 15/30/60/120, with 60 unavailable at 4K and 120 only at SVGA).
+  return "zedxonesrc "
+           "camera-resolution=2 "
+           "camera-fps=30 "
+           "verbose-level=0 "
+         "! queue max-size-buffers=1 leaky=downstream "
+         "! videoconvert ! video/x-raw,format=RGBA "
+         "! nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 "
+         "! nvv4l2h264enc "
+           "maxperf-enable=1 "
+           "preset-level=1 "
+           "insert-sps-pps=true "
+           "iframeinterval=30 "
+           "idrinterval=30 "
+           "bitrate=4000000 "
+           "control-rate=1 "
+           "num-B-Frames=0 "
+         "! h264parse config-interval=-1 "
+         "! rtph264pay "
+           "pt=98 "
+           "ssrc=44 "
+           "mtu=1200 "
+           "config-interval=-1 "
+           "aggregate-mode=zero-latency "
+         "! appsink "
+           "name=rtpsink_mono "
+           "emit-signals=true "
+           "sync=false "
+           "async=false "
+           "max-buffers=1 "
+           "drop=true "
+           "wait-on-eos=false";
+}
+
 std::string makePipelineDescription(VideoPipeline::Profile profile) {
   switch (profile) {
     case VideoPipeline::Profile::Default:
@@ -198,6 +237,8 @@ std::string makePipelineDescription(VideoPipeline::Profile profile) {
       return makeZedAppsinkPipelineDescription();
     case VideoPipeline::Profile::ZedTwoStreamAppsink:
       return makeZedTwoStreamAppsinkPipelineDescription();
+    case VideoPipeline::Profile::ZedXOneMonoAppsink:
+      return makeZedXOneMonoAppsinkPipelineDescription();
   }
 
   throw std::runtime_error("Unsupported video pipeline profile");
@@ -214,6 +255,8 @@ std::vector<OutputSpec> makeOutputSpecs(VideoPipeline::Profile profile) {
           OutputSpec{"rtpsink_left", 1, true},
           OutputSpec{"rtpsink_right", 1, true},
       };
+    case VideoPipeline::Profile::ZedXOneMonoAppsink:
+      return {OutputSpec{"rtpsink_mono", 1, true}};
   }
 
   throw std::runtime_error("Unsupported video pipeline profile");

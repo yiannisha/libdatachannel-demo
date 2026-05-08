@@ -76,6 +76,16 @@ std::vector<VideoTrackSpec> makeVideoTrackSpecs(
               "track-right",
           },
       };
+    case VideoPipeline::Profile::ZedXOneMonoAppsink:
+      return {VideoTrackSpec{
+          "rtpsink_mono",
+          "video-mono",
+          98,
+          44,
+          "video-mono",
+          "stream-mono",
+          "track-mono",
+      }};
   }
 
   throw std::runtime_error("Unsupported video pipeline profile");
