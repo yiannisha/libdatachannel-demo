@@ -14,7 +14,9 @@ class Producer {
  public:
   Producer(WebSocketSignalTransportConfig signaling_config,
            VideoPipeline::Profile video_pipeline_profile =
-               VideoPipeline::Profile::Default);
+               VideoPipeline::Profile::Default,
+           VideoPipeline::Config video_pipeline_config =
+               VideoPipeline::Config{});
 
   void wait();
   uint16_t port() const;

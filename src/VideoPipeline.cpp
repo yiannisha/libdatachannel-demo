@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -190,16 +191,23 @@ std::string makeZedTwoStreamAppsinkPipelineDescription() {
          "appsink name=rtpsink_right emit-signals=true sync=false async=false max-buffers=1 drop=true wait-on-eos=false";
 }
 
-std::string makeZedXOneMonoAppsinkPipelineDescription() {
+std::string makeZedXOneMonoAppsinkPipelineDescription(
+    const VideoPipeline::Config& config) {
   // ZED X One monocular pipeline. See
   // https://www.stereolabs.com/docs/gstreamer/zedxone-camera-source for the
   // available zedxonesrc properties (camera-resolution is an enum: 0=SVGA GS,
   // 1=HD1080, 2=HD1200, 3=QHDPLUS 4K-only, 4=4K 4K-only; camera-fps is also
   // an enum: 15/30/60/120, with 60 unavailable at 4K and 120 only at SVGA).
-  return "zedxonesrc "
-           "camera-resolution=2 "
-           "camera-fps=30 "
-           "verbose-level=0 "
+  std::string source =
+      "zedxonesrc "
+      "camera-resolution=2 "
+      "camera-fps=30 "
+      "verbose-level=0 ";
+  if (config.zed_x_one_camera_id >= 0) {
+    source += "camera-id=" + std::to_string(config.zed_x_one_camera_id) + " ";
+  }
+
+  return source +
          "! queue max-size-buffers=1 leaky=downstream "
          "! videoconvert ! video/x-raw,format=RGBA "
          "! nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 "
@@ -229,7 +237,8 @@ std::string makeZedXOneMonoAppsinkPipelineDescription() {
            "wait-on-eos=false";
 }
 
-std::string makePipelineDescription(VideoPipeline::Profile profile) {
+std::string makePipelineDescription(VideoPipeline::Profile profile,
+                                    const VideoPipeline::Config& config) {
   switch (profile) {
     case VideoPipeline::Profile::Default:
       return makeDefaultPipelineDescription();
@@ -238,7 +247,7 @@ std::string makePipelineDescription(VideoPipeline::Profile profile) {
     case VideoPipeline::Profile::ZedTwoStreamAppsink:
       return makeZedTwoStreamAppsinkPipelineDescription();
     case VideoPipeline::Profile::ZedXOneMonoAppsink:
-      return makeZedXOneMonoAppsinkPipelineDescription();
+      return makeZedXOneMonoAppsinkPipelineDescription(config);
   }
 
   throw std::runtime_error("Unsupported video pipeline profile");
@@ -274,8 +283,9 @@ bool& gstreamerInitialized() {
 
 }  // namespace
 
-VideoPipeline::VideoPipeline(Profile profile)
-    : profile_(profile) {}
+VideoPipeline::VideoPipeline(Profile profile, Config config)
+    : profile_(profile),
+      config_(config) {}
 
 VideoPipeline::VideoPipeline()
     : VideoPipeline(Profile::Default) {}
@@ -297,7 +307,8 @@ void VideoPipeline::start() {
   ensureGStreamerInitialized();
 
   GError* error = nullptr;
-  const std::string pipeline_description = makePipelineDescription(profile_);
+  const std::string pipeline_description =
+      makePipelineDescription(profile_, config_);
   pipeline_ = gst_parse_launch(pipeline_description.c_str(), &error);
   if (!pipeline_) {
     const std::string message =

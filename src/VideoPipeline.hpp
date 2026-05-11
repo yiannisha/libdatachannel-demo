@@ -28,7 +28,15 @@ class VideoPipeline {
     ZedXOneMonoAppsink,
   };
 
-  explicit VideoPipeline(Profile profile = Profile::Default);
+  struct Config {
+    explicit constexpr Config(int camera_id = -1)
+        : zed_x_one_camera_id(camera_id) {}
+
+    int zed_x_one_camera_id;
+  };
+
+  explicit VideoPipeline(Profile profile = Profile::Default,
+                         Config config = Config{});
   VideoPipeline();
   ~VideoPipeline();
 
@@ -59,6 +67,7 @@ class VideoPipeline {
   std::thread bus_thread_;
   std::atomic<bool> running_{false};
   Profile profile_ = Profile::Default;
+  Config config_;
   std::vector<TrackBinding> track_bindings_;
   std::vector<ActiveOutput> outputs_;
   std::mutex mutex_;

@@ -112,10 +112,11 @@ std::vector<VideoPipeline::TrackBinding> makeTrackBindings(
 }  // namespace
 
 Producer::Producer(WebSocketSignalTransportConfig signaling_config,
-                   VideoPipeline::Profile video_pipeline_profile)
+                   VideoPipeline::Profile video_pipeline_profile,
+                   VideoPipeline::Config video_pipeline_config)
     : peer_connection_(makePeerConfiguration()),
       signaling_transport_(std::move(signaling_config)),
-      video_pipeline_(video_pipeline_profile) {
+      video_pipeline_(video_pipeline_profile, video_pipeline_config) {
   setupPeerConnection();
   setupVideoTracks(video_pipeline_profile);
   video_pipeline_.setTrackBindings(
