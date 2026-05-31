@@ -32,7 +32,7 @@ std::string makeDefaultPipelineDescription() {
   return std::string(kVideoSource) +
          " ! "
          "videoconvert ! "
-         "video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! "
+         "video/x-raw,format=I420,width=320,height=240,framerate=30/1 ! "
          "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=4000 ! "
          "h264parse config-interval=-1 ! "
          "rtph264pay pt=96 ssrc=42 mtu=1200 config-interval=-1 aggregate-mode=zero-latency ! "
@@ -124,6 +124,8 @@ std::string makeZedAppsinkPipelineDescription() {
            "sdk-verbose=0 "
 
          "! video/x-raw(memory:NVMM),format=NV12 "
+         "! nvvidconv "
+         "! video/x-raw(memory:NVMM),width=960,height=600,format=NV12 "
          "! queue max-size-buffers=1 leaky=downstream "
          "! nvv4l2h264enc "
            "maxperf-enable=1 "
@@ -152,14 +154,14 @@ std::string makeZedAppsinkPipelineDescription() {
 }
 
 std::string makeZedTwoStreamAppsinkPipelineDescription() {
-  return "zedsrc stream-type=2 camera-resolution=1 camera-fps=30 ! "
+  return "zedsrc stream-type=2 camera-resolution=1 camera-fps=30 ctrl-sharpness=8 ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "zeddemux is-depth=false is-mono=false name=demux "
 
          "demux.src_left ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "videoconvert ! video/x-raw,format=RGBA ! "
-         "nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 ! "
+         "nvvidconv interpolation-method=5 ! video/x-raw(memory:NVMM),width=1280,height=720,format=NV12 ! "
          "nvv4l2h264enc "
            "maxperf-enable=1 "
            "preset-level=1 "
@@ -176,7 +178,7 @@ std::string makeZedTwoStreamAppsinkPipelineDescription() {
          "demux.src_aux ! "
          "queue max-size-buffers=1 leaky=downstream ! "
          "videoconvert ! video/x-raw,format=RGBA ! "
-         "nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 ! "
+         "nvvidconv interpolation-method=5 ! video/x-raw(memory:NVMM),width=1280,height=720,format=NV12 ! "
          "nvv4l2h264enc "
            "maxperf-enable=1 "
            "preset-level=1 "
@@ -210,7 +212,7 @@ std::string makeZedXOneMonoAppsinkPipelineDescription(
   return source +
          "! queue max-size-buffers=1 leaky=downstream "
          "! videoconvert ! video/x-raw,format=RGBA "
-         "! nvvidconv ! video/x-raw(memory:NVMM),width=1280,height=800,format=NV12 "
+         "! nvvidconv ! video/x-raw(memory:NVMM),width=640,height=400,format=NV12 "
          "! nvv4l2h264enc "
            "maxperf-enable=1 "
            "preset-level=1 "
