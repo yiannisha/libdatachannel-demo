@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace demo {
@@ -16,7 +17,8 @@ class Producer {
            VideoPipeline::Profile video_pipeline_profile =
                VideoPipeline::Profile::Default,
            VideoPipeline::Config video_pipeline_config =
-               VideoPipeline::Config{});
+               VideoPipeline::Config{},
+           std::string bind_address = {});
 
   void wait();
   uint16_t port() const;

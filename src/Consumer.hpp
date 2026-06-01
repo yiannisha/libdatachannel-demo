@@ -21,7 +21,8 @@ public:
 
   explicit Consumer(WebSocketSignalTransportConfig signaling_config,
                     RtpPacketCallback on_rtp_packet = {},
-                    bool enable_udp_probe = true);
+                    bool enable_udp_probe = true,
+                    std::string bind_address = {});
   ~Consumer();
 
   void wait() const;

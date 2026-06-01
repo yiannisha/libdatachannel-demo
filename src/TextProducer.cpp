@@ -15,9 +15,14 @@ namespace demo {
 
 namespace {
 
-rtc::Configuration makePeerConfiguration() {
+rtc::Configuration makePeerConfiguration(const std::string &bind_address) {
   rtc::Configuration config;
   config.iceServers.emplace_back("stun:stun.l.google.com:19302");
+  if (!bind_address.empty()) {
+    // Pin ICE to a single local interface (e.g. the direct Ethernet link)
+    // instead of gathering candidates on every interface.
+    config.bindAddress = bind_address;
+  }
   return config;
 }
 
@@ -80,8 +85,9 @@ std::vector<std::string> makeDefaultMessages() {
 TextProducer::TextProducer(WebSocketSignalTransportConfig signaling_config,
                            std::vector<std::string> messages,
                            bool use_default_messages,
-                           std::string data_channel_label)
-    : peer_connection_(makePeerConfiguration()),
+                           std::string data_channel_label,
+                           std::string bind_address)
+    : peer_connection_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       data_channel_label_(data_channel_label.empty()
                               ? "text-demo"

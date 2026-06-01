@@ -16,7 +16,8 @@ public:
   TextProducer(WebSocketSignalTransportConfig signaling_config,
                std::vector<std::string> messages = {},
                bool use_default_messages = true,
-               std::string data_channel_label = "text-demo");
+               std::string data_channel_label = "text-demo",
+               std::string bind_address = {});
 
   void enqueueMessage(std::string message);
   bool sendMessageIfOpen(const std::string &message);

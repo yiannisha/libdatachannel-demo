@@ -17,9 +17,14 @@ namespace demo {
 
 namespace {
 
-rtc::Configuration makePeerConfiguration() {
+rtc::Configuration makePeerConfiguration(const std::string &bind_address) {
   rtc::Configuration config;
   config.iceServers.emplace_back("stun:stun.l.google.com:19302");
+  if (!bind_address.empty()) {
+    // Pin ICE to a single local interface (e.g. the direct Ethernet link)
+    // instead of gathering candidates on every interface.
+    config.bindAddress = bind_address;
+  }
   return config;
 }
 
@@ -36,8 +41,9 @@ formatMessage(const std::variant<rtc::binary, rtc::string> &message) {
 } // namespace
 
 Consumer::Consumer(WebSocketSignalTransportConfig signaling_config,
-                   RtpPacketCallback on_rtp_packet, bool enable_udp_probe)
-    : peer_connection_(makePeerConfiguration()),
+                   RtpPacketCallback on_rtp_packet, bool enable_udp_probe,
+                   std::string bind_address)
+    : peer_connection_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       on_rtp_packet_(std::move(on_rtp_packet)),
       enable_udp_probe_(enable_udp_probe) {

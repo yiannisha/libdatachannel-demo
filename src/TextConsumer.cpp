@@ -15,9 +15,14 @@ namespace demo {
 
 namespace {
 
-rtc::Configuration makePeerConfiguration() {
+rtc::Configuration makePeerConfiguration(const std::string &bind_address) {
   rtc::Configuration config;
   config.iceServers.emplace_back("stun:stun.l.google.com:19302");
+  if (!bind_address.empty()) {
+    // Pin ICE to a single local interface (e.g. the direct Ethernet link)
+    // instead of gathering candidates on every interface.
+    config.bindAddress = bind_address;
+  }
   return config;
 }
 
@@ -88,8 +93,9 @@ std::string decodeTextMessagePayload(const std::string &payload) {
 
 TextConsumer::TextConsumer(
     WebSocketSignalTransportConfig signaling_config,
-    std::function<void(const std::string &)> on_text_message)
-    : peer_connection_(makePeerConfiguration()),
+    std::function<void(const std::string &)> on_text_message,
+    std::string bind_address)
+    : peer_connection_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       on_text_message_(std::move(on_text_message)) {
   setupPeerConnection();

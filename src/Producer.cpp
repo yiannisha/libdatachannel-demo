@@ -26,9 +26,14 @@ struct VideoTrackSpec {
   std::string track_id;
 };
 
-rtc::Configuration makePeerConfiguration() {
+rtc::Configuration makePeerConfiguration(const std::string& bind_address) {
   rtc::Configuration config;
   config.iceServers.emplace_back("stun:stun.l.google.com:19302");
+  if (!bind_address.empty()) {
+    // Pin ICE to a single local interface (e.g. the direct Ethernet link)
+    // instead of gathering candidates on every interface.
+    config.bindAddress = bind_address;
+  }
   return config;
 }
 
@@ -113,8 +118,9 @@ std::vector<VideoPipeline::TrackBinding> makeTrackBindings(
 
 Producer::Producer(WebSocketSignalTransportConfig signaling_config,
                    VideoPipeline::Profile video_pipeline_profile,
-                   VideoPipeline::Config video_pipeline_config)
-    : peer_connection_(makePeerConfiguration()),
+                   VideoPipeline::Config video_pipeline_config,
+                   std::string bind_address)
+    : peer_connection_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       video_pipeline_(video_pipeline_profile, video_pipeline_config) {
   setupPeerConnection();

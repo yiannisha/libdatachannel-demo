@@ -15,7 +15,8 @@ class TextConsumer {
 public:
   explicit TextConsumer(
       WebSocketSignalTransportConfig signaling_config,
-      std::function<void(const std::string &)> on_text_message = {});
+      std::function<void(const std::string &)> on_text_message = {},
+      std::string bind_address = {});
 
   void wait() const;
   uint16_t port() const;
