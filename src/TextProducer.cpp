@@ -90,7 +90,7 @@ TextProducer::TextProducer(WebSocketSignalTransportConfig signaling_config,
                            bool use_default_messages,
                            std::string data_channel_label,
                            std::string bind_address)
-    : peer_connection_(makePeerConfiguration(bind_address)),
+    : peer_config_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       data_channel_label_(data_channel_label.empty()
                               ? "text-demo"
@@ -100,7 +100,7 @@ TextProducer::TextProducer(WebSocketSignalTransportConfig signaling_config,
   } else {
     pending_data_channel_messages_ = std::move(messages);
   }
-  setupPeerConnection();
+  createPeerConnection();
   setupSignalingTransport();
   signaling_transport_.start();
 }
@@ -159,24 +159,44 @@ std::string TextProducer::signalingEndpoint() const {
   return signaling_transport_.endpointDescription();
 }
 
-void TextProducer::setupPeerConnection() {
-  peer_connection_.onStateChange([](rtc::PeerConnection::State state) {
+void TextProducer::createPeerConnection() {
+  auto new_pc = std::make_shared<rtc::PeerConnection>(peer_config_);
+  wirePeerCallbacks(new_pc);
+
+  std::shared_ptr<rtc::PeerConnection> old_pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    old_pc = std::move(peer_connection_);
+    peer_connection_ = new_pc;
+    remote_description_set_ = false;
+    pending_candidates_.clear();
+    data_channel_started_ = false;
+    data_channel_open_ = false;
+    data_channel_.reset();
+  }
+  // old_pc (if any) is destroyed here, outside the lock, so its in-flight
+  // callbacks can drain without deadlocking against mutex_.
+}
+
+void TextProducer::wirePeerCallbacks(
+    const std::shared_ptr<rtc::PeerConnection> &pc) {
+  pc->onStateChange([](rtc::PeerConnection::State state) {
     std::cout << "text producer peer state: " << state << '\n';
   });
 
-  peer_connection_.onGatheringStateChange(
+  pc->onGatheringStateChange(
       [](rtc::PeerConnection::GatheringState state) {
         std::cout << "text producer gathering state: " << state << '\n';
       });
 
-  peer_connection_.onLocalDescription(
+  pc->onLocalDescription(
       [this](const rtc::Description &description) {
         std::cout << "text producer generated local description\n";
         signaling_transport_.send(serializeSignalingMessage(
             makeLocalDescriptionMessage(description)));
       });
 
-  peer_connection_.onLocalCandidate([this](const rtc::Candidate &candidate) {
+  pc->onLocalCandidate([this](const rtc::Candidate &candidate) {
     signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
@@ -191,7 +211,7 @@ void TextProducer::setupSignalingTransport() {
                 << signaling_transport_.endpointDescription() << '\n';
     }
 
-    startDataChannel();
+    onSignalingConnected();
   });
 
   signaling_transport_.setOnClosed([this]() {
@@ -210,16 +230,42 @@ void TextProducer::setupSignalingTransport() {
       [this](const std::string &payload) { handleSignalingMessage(payload); });
 }
 
+void TextProducer::onSignalingConnected() {
+  bool reconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reconnect = signaling_connected_before_;
+    signaling_connected_before_ = true;
+  }
+
+  if (reconnect) {
+    std::cout << "text producer signaling reconnected; rebuilding peer "
+                 "connection\n";
+    createPeerConnection();
+  }
+
+  startDataChannel();
+}
+
 void TextProducer::handleSignalingMessage(const std::string &payload) {
+  std::shared_ptr<rtc::PeerConnection> pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pc = peer_connection_;
+  }
+  if (!pc) {
+    return;
+  }
+
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
     case SignalingCommand::LocalDescription:
       handleRemoteDescription(
-          parseRemoteDescription(message, peer_connection_.signalingState()));
+          pc, parseRemoteDescription(message, pc->signalingState()));
       break;
     case SignalingCommand::LocalCandidate:
-      handleRemoteCandidate(parseRemoteCandidate(message));
+      handleRemoteCandidate(pc, parseRemoteCandidate(message));
       break;
     }
   } catch (const std::exception &error) {
@@ -229,8 +275,9 @@ void TextProducer::handleSignalingMessage(const std::string &payload) {
 }
 
 void TextProducer::handleRemoteDescription(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
     const rtc::Description &description) {
-  peer_connection_.setRemoteDescription(description);
+  pc->setRemoteDescription(description);
 
   std::vector<rtc::Candidate> pending_candidates;
   {
@@ -240,11 +287,13 @@ void TextProducer::handleRemoteDescription(
   }
 
   for (auto &candidate : pending_candidates) {
-    peer_connection_.addRemoteCandidate(std::move(candidate));
+    pc->addRemoteCandidate(std::move(candidate));
   }
 }
 
-void TextProducer::handleRemoteCandidate(const rtc::Candidate &candidate) {
+void TextProducer::handleRemoteCandidate(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
+    const rtc::Candidate &candidate) {
   if (candidate.candidate().empty()) {
     return;
   }
@@ -259,19 +308,32 @@ void TextProducer::handleRemoteCandidate(const rtc::Candidate &candidate) {
   }
 
   if (!should_queue) {
-    peer_connection_.addRemoteCandidate(candidate);
+    pc->addRemoteCandidate(candidate);
   }
 }
 
 void TextProducer::startDataChannel() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (data_channel_started_) {
+  std::shared_ptr<rtc::PeerConnection> pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (data_channel_started_) {
+      return;
+    }
+    data_channel_started_ = true;
+    pc = peer_connection_;
+  }
+  if (!pc) {
     return;
   }
 
-  data_channel_started_ = true;
-  data_channel_ = peer_connection_.createDataChannel(data_channel_label_);
-  data_channel_->onOpen([this, channel = data_channel_]() {
+  std::shared_ptr<rtc::DataChannel> channel =
+      pc->createDataChannel(data_channel_label_);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    data_channel_ = channel;
+  }
+
+  channel->onOpen([this, channel]() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       data_channel_open_ = true;
@@ -282,13 +344,13 @@ void TextProducer::startDataChannel() {
     flushPendingDataChannelMessages();
   });
 
-  data_channel_->onClosed([this]() {
+  channel->onClosed([this]() {
     std::lock_guard<std::mutex> lock(mutex_);
     data_channel_open_ = false;
     std::cout << "text producer data channel closed\n";
   });
 
-  data_channel_->onMessage([](const auto &message) {
+  channel->onMessage([](const auto &message) {
     std::cout << "text producer received on data channel: "
               << formatMessage(message) << '\n';
   });

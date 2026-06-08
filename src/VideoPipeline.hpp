@@ -50,6 +50,10 @@ class VideoPipeline {
   };
 
   void setTrackBindings(std::vector<TrackBinding> bindings);
+  // Swap the RTC tracks a running pipeline forwards to (used when the peer
+  // connection is rebuilt on reconnect). Matches bindings to live outputs by
+  // sink name; safe to call while the pipeline is streaming.
+  void updateTracks(const std::vector<TrackBinding> &bindings);
   void start();
   void stop();
   bool isRunning() const;

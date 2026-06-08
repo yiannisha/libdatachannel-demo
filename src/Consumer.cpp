@@ -44,12 +44,12 @@ formatMessage(const std::variant<rtc::binary, rtc::string> &message) {
 Consumer::Consumer(WebSocketSignalTransportConfig signaling_config,
                    RtpPacketCallback on_rtp_packet, bool enable_udp_probe,
                    std::string bind_address)
-    : peer_connection_(makePeerConfiguration(bind_address)),
+    : peer_config_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       on_rtp_packet_(std::move(on_rtp_packet)),
       enable_udp_probe_(enable_udp_probe) {
   setupUdpProbe();
-  setupPeerConnection();
+  createPeerConnection();
   setupSignalingTransport();
   signaling_transport_.start();
 }
@@ -98,50 +98,75 @@ void Consumer::setupUdpProbe() {
             << udp_probe_port_ << '\n';
 }
 
-void Consumer::setupPeerConnection() {
-  peer_connection_.onStateChange([](rtc::PeerConnection::State state) {
+void Consumer::createPeerConnection() {
+  auto new_pc = std::make_shared<rtc::PeerConnection>(peer_config_);
+  wirePeerCallbacks(new_pc);
+
+  std::shared_ptr<rtc::PeerConnection> old_pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    old_pc = std::move(peer_connection_);
+    peer_connection_ = new_pc;
+    remote_description_set_ = false;
+    pending_candidates_.clear();
+    data_channel_.reset();
+    tracks_.clear();
+  }
+  // old_pc (if any) is destroyed here, outside the lock, so its in-flight
+  // callbacks can drain without deadlocking against mutex_.
+}
+
+void Consumer::wirePeerCallbacks(
+    const std::shared_ptr<rtc::PeerConnection> &pc) {
+  pc->onStateChange([](rtc::PeerConnection::State state) {
     std::cout << "consumer peer state: " << state << '\n';
   });
 
-  peer_connection_.onGatheringStateChange(
+  pc->onGatheringStateChange(
       [](rtc::PeerConnection::GatheringState state) {
         std::cout << "consumer gathering state: " << state << '\n';
       });
 
-  peer_connection_.onLocalDescription(
+  pc->onLocalDescription(
       [this](const rtc::Description &description) {
         std::cout << "consumer generated local description\n";
         signaling_transport_.send(serializeSignalingMessage(
             makeLocalDescriptionMessage(description)));
       });
 
-  peer_connection_.onLocalCandidate([this](const rtc::Candidate &candidate) {
+  pc->onLocalCandidate([this](const rtc::Candidate &candidate) {
     signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 
-  peer_connection_.onDataChannel(
+  pc->onDataChannel(
       [this](const std::shared_ptr<rtc::DataChannel> &channel) {
-        data_channel_ = channel;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          data_channel_ = channel;
+        }
         std::cout << "consumer accepted data channel: " << channel->label()
                   << '\n';
 
-        data_channel_->onOpen([channel]() {
+        channel->onOpen([channel]() {
           std::cout << "consumer data channel open (" << channel->label()
                     << ")\n";
         });
 
-        data_channel_->onClosed(
+        channel->onClosed(
             []() { std::cout << "consumer data channel closed\n"; });
 
-        data_channel_->onMessage([](const auto &message) {
+        channel->onMessage([](const auto &message) {
           std::cout << "consumer received on data channel: "
                     << formatMessage(message) << '\n';
         });
       });
 
-  peer_connection_.onTrack([this](const std::shared_ptr<rtc::Track> &track) {
-    tracks_.push_back(track);
+  pc->onTrack([this](const std::shared_ptr<rtc::Track> &track) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      tracks_.push_back(track);
+    }
     std::cout << "consumer accepted track: mid=" << track->mid()
               << " direction=" << track->direction() << '\n';
 
@@ -202,6 +227,8 @@ void Consumer::setupSignalingTransport() {
       std::cout << "consumer websocket connected to "
                 << signaling_transport_.endpointDescription() << '\n';
     }
+
+    onSignalingConnected();
   });
 
   signaling_transport_.setOnClosed([this]() {
@@ -220,16 +247,39 @@ void Consumer::setupSignalingTransport() {
       [this](const std::string &payload) { handleSignalingMessage(payload); });
 }
 
+void Consumer::onSignalingConnected() {
+  bool reconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reconnect = signaling_connected_before_;
+    signaling_connected_before_ = true;
+  }
+
+  if (reconnect) {
+    std::cout << "consumer signaling reconnected; rebuilding peer connection\n";
+    createPeerConnection();
+  }
+}
+
 void Consumer::handleSignalingMessage(const std::string &payload) {
+  std::shared_ptr<rtc::PeerConnection> pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pc = peer_connection_;
+  }
+  if (!pc) {
+    return;
+  }
+
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
     case SignalingCommand::LocalDescription:
       handleRemoteDescription(
-          parseRemoteDescription(message, peer_connection_.signalingState()));
+          pc, parseRemoteDescription(message, pc->signalingState()));
       break;
     case SignalingCommand::LocalCandidate:
-      handleRemoteCandidate(parseRemoteCandidate(message));
+      handleRemoteCandidate(pc, parseRemoteCandidate(message));
       break;
     }
   } catch (const std::exception &error) {
@@ -238,8 +288,10 @@ void Consumer::handleSignalingMessage(const std::string &payload) {
   }
 }
 
-void Consumer::handleRemoteDescription(const rtc::Description &description) {
-  peer_connection_.setRemoteDescription(description);
+void Consumer::handleRemoteDescription(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
+    const rtc::Description &description) {
+  pc->setRemoteDescription(description);
 
   std::vector<rtc::Candidate> pending_candidates;
   {
@@ -249,11 +301,13 @@ void Consumer::handleRemoteDescription(const rtc::Description &description) {
   }
 
   for (auto &candidate : pending_candidates) {
-    peer_connection_.addRemoteCandidate(std::move(candidate));
+    pc->addRemoteCandidate(std::move(candidate));
   }
 }
 
-void Consumer::handleRemoteCandidate(const rtc::Candidate &candidate) {
+void Consumer::handleRemoteCandidate(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
+    const rtc::Candidate &candidate) {
   if (candidate.candidate().empty()) {
     return;
   }
@@ -268,7 +322,7 @@ void Consumer::handleRemoteCandidate(const rtc::Candidate &candidate) {
   }
 
   if (!should_queue) {
-    peer_connection_.addRemoteCandidate(candidate);
+    pc->addRemoteCandidate(candidate);
   }
 }
 

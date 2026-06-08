@@ -32,14 +32,19 @@ public:
 
 private:
   void setupUdpProbe();
-  void setupPeerConnection();
+  void createPeerConnection();
+  void wirePeerCallbacks(const std::shared_ptr<rtc::PeerConnection> &pc);
   void setupSignalingTransport();
+  void onSignalingConnected();
   void handleSignalingMessage(const std::string &payload);
-  void handleRemoteDescription(const rtc::Description &description);
-  void handleRemoteCandidate(const rtc::Candidate &candidate);
+  void handleRemoteDescription(const std::shared_ptr<rtc::PeerConnection> &pc,
+                               const rtc::Description &description);
+  void handleRemoteCandidate(const std::shared_ptr<rtc::PeerConnection> &pc,
+                             const rtc::Candidate &candidate);
   void mirrorRtpToUdpProbe(const rtc::binary &packet) const;
 
-  rtc::PeerConnection peer_connection_;
+  rtc::Configuration peer_config_;
+  std::shared_ptr<rtc::PeerConnection> peer_connection_;
   WebSocketSignalTransport signaling_transport_;
   RtpPacketCallback on_rtp_packet_;
 
@@ -48,6 +53,7 @@ private:
 
   mutable std::mutex mutex_;
   bool remote_description_set_ = false;
+  bool signaling_connected_before_ = false;
   std::vector<rtc::Candidate> pending_candidates_;
 
   bool enable_udp_probe_ = true;

@@ -27,15 +27,20 @@ public:
   std::string signalingEndpoint() const;
 
 private:
-  void setupPeerConnection();
+  void createPeerConnection();
+  void wirePeerCallbacks(const std::shared_ptr<rtc::PeerConnection> &pc);
   void setupSignalingTransport();
+  void onSignalingConnected();
   void handleSignalingMessage(const std::string &payload);
-  void handleRemoteDescription(const rtc::Description &description);
-  void handleRemoteCandidate(const rtc::Candidate &candidate);
+  void handleRemoteDescription(const std::shared_ptr<rtc::PeerConnection> &pc,
+                               const rtc::Description &description);
+  void handleRemoteCandidate(const std::shared_ptr<rtc::PeerConnection> &pc,
+                             const rtc::Candidate &candidate);
   void startDataChannel();
   void flushPendingDataChannelMessages();
 
-  rtc::PeerConnection peer_connection_;
+  rtc::Configuration peer_config_;
+  std::shared_ptr<rtc::PeerConnection> peer_connection_;
   WebSocketSignalTransport signaling_transport_;
 
   std::shared_ptr<rtc::DataChannel> data_channel_;
@@ -44,6 +49,7 @@ private:
   bool remote_description_set_ = false;
   bool data_channel_started_ = false;
   bool data_channel_open_ = false;
+  bool signaling_connected_before_ = false;
   std::string data_channel_label_;
   std::vector<rtc::Candidate> pending_candidates_;
   std::vector<std::string> pending_data_channel_messages_;

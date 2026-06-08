@@ -96,10 +96,10 @@ TextConsumer::TextConsumer(
     WebSocketSignalTransportConfig signaling_config,
     std::function<void(const std::string &)> on_text_message,
     std::string bind_address)
-    : peer_connection_(makePeerConfiguration(bind_address)),
+    : peer_config_(makePeerConfiguration(bind_address)),
       signaling_transport_(std::move(signaling_config)),
       on_text_message_(std::move(on_text_message)) {
-  setupPeerConnection();
+  createPeerConnection();
   setupSignalingTransport();
   signaling_transport_.start();
 }
@@ -120,44 +120,65 @@ std::string TextConsumer::signalingEndpoint() const {
   return signaling_transport_.endpointDescription();
 }
 
-void TextConsumer::setupPeerConnection() {
-  peer_connection_.onStateChange([](rtc::PeerConnection::State state) {
+void TextConsumer::createPeerConnection() {
+  auto new_pc = std::make_shared<rtc::PeerConnection>(peer_config_);
+  wirePeerCallbacks(new_pc);
+
+  std::shared_ptr<rtc::PeerConnection> old_pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    old_pc = std::move(peer_connection_);
+    peer_connection_ = new_pc;
+    remote_description_set_ = false;
+    pending_candidates_.clear();
+    data_channel_.reset();
+  }
+  // old_pc (if any) is destroyed here, outside the lock, so its in-flight
+  // callbacks can drain without deadlocking against mutex_.
+}
+
+void TextConsumer::wirePeerCallbacks(
+    const std::shared_ptr<rtc::PeerConnection> &pc) {
+  pc->onStateChange([](rtc::PeerConnection::State state) {
     std::cout << "text consumer peer state: " << state << '\n';
   });
 
-  peer_connection_.onGatheringStateChange(
+  pc->onGatheringStateChange(
       [](rtc::PeerConnection::GatheringState state) {
         std::cout << "text consumer gathering state: " << state << '\n';
       });
 
-  peer_connection_.onLocalDescription(
+  pc->onLocalDescription(
       [this](const rtc::Description &description) {
         std::cout << "text consumer generated local description\n";
         signaling_transport_.send(serializeSignalingMessage(
             makeLocalDescriptionMessage(description)));
       });
 
-  peer_connection_.onLocalCandidate([this](const rtc::Candidate &candidate) {
+  pc->onLocalCandidate([this](const rtc::Candidate &candidate) {
     signaling_transport_.send(
         serializeSignalingMessage(makeLocalCandidateMessage(candidate)));
   });
 
-  peer_connection_.onDataChannel(
+  pc->onDataChannel(
       [this](const std::shared_ptr<rtc::DataChannel> &channel) {
-        data_channel_ = channel;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          data_channel_ = channel;
+        }
         std::cout << "text consumer accepted data channel: " << channel->label()
                   << '\n';
 
-        data_channel_->onOpen([channel]() {
+        channel->onOpen([channel]() {
           std::cout << "text consumer data channel open (" << channel->label()
                     << ")\n";
           channel->send("ack from text consumer");
         });
 
-        data_channel_->onClosed(
+        channel->onClosed(
             []() { std::cout << "text consumer data channel closed\n"; });
 
-        data_channel_->onMessage([this](const auto &message) {
+        channel->onMessage([this](const auto &message) {
           if (std::holds_alternative<rtc::string>(message)) {
             const std::string &payload = std::get<rtc::string>(message);
             if (verboseLoggingEnabled()) {
@@ -185,6 +206,8 @@ void TextConsumer::setupSignalingTransport() {
       std::cout << "text consumer websocket connected to "
                 << signaling_transport_.endpointDescription() << '\n';
     }
+
+    onSignalingConnected();
   });
 
   signaling_transport_.setOnClosed([this]() {
@@ -203,16 +226,40 @@ void TextConsumer::setupSignalingTransport() {
       [this](const std::string &payload) { handleSignalingMessage(payload); });
 }
 
+void TextConsumer::onSignalingConnected() {
+  bool reconnect;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reconnect = signaling_connected_before_;
+    signaling_connected_before_ = true;
+  }
+
+  if (reconnect) {
+    std::cout << "text consumer signaling reconnected; rebuilding peer "
+                 "connection\n";
+    createPeerConnection();
+  }
+}
+
 void TextConsumer::handleSignalingMessage(const std::string &payload) {
+  std::shared_ptr<rtc::PeerConnection> pc;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pc = peer_connection_;
+  }
+  if (!pc) {
+    return;
+  }
+
   try {
     const SignalingMessage message = parseSignalingMessage(payload);
     switch (message.command) {
     case SignalingCommand::LocalDescription:
       handleRemoteDescription(
-          parseRemoteDescription(message, peer_connection_.signalingState()));
+          pc, parseRemoteDescription(message, pc->signalingState()));
       break;
     case SignalingCommand::LocalCandidate:
-      handleRemoteCandidate(parseRemoteCandidate(message));
+      handleRemoteCandidate(pc, parseRemoteCandidate(message));
       break;
     }
   } catch (const std::exception &error) {
@@ -222,8 +269,9 @@ void TextConsumer::handleSignalingMessage(const std::string &payload) {
 }
 
 void TextConsumer::handleRemoteDescription(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
     const rtc::Description &description) {
-  peer_connection_.setRemoteDescription(description);
+  pc->setRemoteDescription(description);
 
   std::vector<rtc::Candidate> pending_candidates;
   {
@@ -233,11 +281,13 @@ void TextConsumer::handleRemoteDescription(
   }
 
   for (auto &candidate : pending_candidates) {
-    peer_connection_.addRemoteCandidate(std::move(candidate));
+    pc->addRemoteCandidate(std::move(candidate));
   }
 }
 
-void TextConsumer::handleRemoteCandidate(const rtc::Candidate &candidate) {
+void TextConsumer::handleRemoteCandidate(
+    const std::shared_ptr<rtc::PeerConnection> &pc,
+    const rtc::Candidate &candidate) {
   if (candidate.candidate().empty()) {
     return;
   }
@@ -252,7 +302,7 @@ void TextConsumer::handleRemoteCandidate(const rtc::Candidate &candidate) {
   }
 
   if (!should_queue) {
-    peer_connection_.addRemoteCandidate(candidate);
+    pc->addRemoteCandidate(candidate);
   }
 }
 

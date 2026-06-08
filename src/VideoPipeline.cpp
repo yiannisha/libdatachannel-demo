@@ -303,6 +303,19 @@ void VideoPipeline::setTrackBindings(std::vector<TrackBinding> bindings) {
   track_bindings_ = std::move(bindings);
 }
 
+void VideoPipeline::updateTracks(const std::vector<TrackBinding> &bindings) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  track_bindings_ = bindings;
+  for (ActiveOutput &output : outputs_) {
+    for (const TrackBinding &binding : bindings) {
+      if (binding.sink_name == output.sink_name) {
+        output.track = binding.track;
+        break;
+      }
+    }
+  }
+}
+
 void VideoPipeline::start() {
   if (running_) {
     return;
