@@ -1,5 +1,6 @@
 #include "Consumer.hpp"
 
+#include "DemoLogging.hpp"
 #include "SignalingProtocol.hpp"
 
 #include <arpa/inet.h>
@@ -167,6 +168,10 @@ void Consumer::setupPeerConnection() {
           }
 
           mirrorRtpToUdpProbe(message);
+
+          if (!verboseLoggingEnabled()) {
+            return;
+          }
 
           if (message.size() >= sizeof(rtc::RtpHeader)) {
             const auto *header =

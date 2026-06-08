@@ -1,5 +1,6 @@
 #include "TextProducer.hpp"
 
+#include "DemoLogging.hpp"
 #include "SignalingProtocol.hpp"
 
 #include <chrono>
@@ -67,8 +68,10 @@ bool sendTextMessage(const std::shared_ptr<rtc::DataChannel> &channel,
     return false;
   }
 
-  std::cout << "text producer sent at " << formatTimestamp(sent_at) << ": "
-            << body << '\n';
+  if (verboseLoggingEnabled()) {
+    std::cout << "text producer sent at " << formatTimestamp(sent_at) << ": "
+              << body << '\n';
+  }
   return true;
 }
 

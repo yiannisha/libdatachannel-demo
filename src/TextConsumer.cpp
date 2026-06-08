@@ -1,5 +1,6 @@
 #include "TextConsumer.hpp"
 
+#include "DemoLogging.hpp"
 #include "SignalingProtocol.hpp"
 
 #include <chrono>
@@ -159,15 +160,19 @@ void TextConsumer::setupPeerConnection() {
         data_channel_->onMessage([this](const auto &message) {
           if (std::holds_alternative<rtc::string>(message)) {
             const std::string &payload = std::get<rtc::string>(message);
-            std::cout << formatReceivedTextMessage(payload) << '\n';
+            if (verboseLoggingEnabled()) {
+              std::cout << formatReceivedTextMessage(payload) << '\n';
+            }
             if (on_text_message_) {
               on_text_message_(decodeTextMessagePayload(payload));
             }
             return;
           }
 
-          std::cout << "text consumer received on data channel: "
-                    << formatMessage(message) << '\n';
+          if (verboseLoggingEnabled()) {
+            std::cout << "text consumer received on data channel: "
+                      << formatMessage(message) << '\n';
+          }
         });
       });
 }

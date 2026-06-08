@@ -150,6 +150,10 @@ std::string Producer::signalingEndpoint() const {
   return signaling_transport_.endpointDescription();
 }
 
+std::vector<VideoPipeline::OutputStat> Producer::videoOutputStats() const {
+  return video_pipeline_.snapshotOutputStats();
+}
+
 void Producer::setupPeerConnection() {
   peer_connection_.onStateChange([](rtc::PeerConnection::State state) {
     std::cout << "producer peer state: " << state << '\n';

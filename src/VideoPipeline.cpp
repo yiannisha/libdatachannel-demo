@@ -1,5 +1,7 @@
 #include "VideoPipeline.hpp"
 
+#include "DemoLogging.hpp"
+
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 
@@ -444,6 +446,19 @@ bool VideoPipeline::isRunning() const {
   return running_;
 }
 
+std::vector<VideoPipeline::OutputStat> VideoPipeline::snapshotOutputStats()
+    const {
+  std::vector<OutputStat> stats;
+  std::lock_guard<std::mutex> lock(mutex_);
+  stats.reserve(outputs_.size());
+  for (const ActiveOutput& output : outputs_) {
+    stats.push_back(
+        OutputStat{output.sink_name, output.rtp_packet_count,
+                   output.frame_count});
+  }
+  return stats;
+}
+
 void VideoPipeline::ensureGStreamerInitialized() {
   std::lock_guard<std::mutex> lock(gstreamerInitMutex());
   if (gstreamerInitialized()) {
@@ -486,6 +501,13 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
     return GST_FLOW_ERROR;
   }
 
+  // The RTP marker bit is set on the last packet of an access unit, so counting
+  // marked packets yields the encoded frame rate.
+  bool frame_end = false;
+  if (map.size >= sizeof(rtc::RtpHeader)) {
+    frame_end = reinterpret_cast<const rtc::RtpHeader*>(map.data)->marker();
+  }
+
   std::shared_ptr<rtc::Track> track;
   std::string sink_name;
   std::uint64_t packet_count = 0;
@@ -506,6 +528,9 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
     track = output_it->track;
     sink_name = output_it->sink_name;
     packet_count = ++output_it->rtp_packet_count;
+    if (frame_end) {
+      ++output_it->frame_count;
+    }
   }
 
   const bool track_open = track && track->isOpen();
@@ -513,7 +538,8 @@ GstFlowReturn VideoPipeline::handleNewRtpSample(GstAppSink* sink) {
       ? track->send(reinterpret_cast<const rtc::byte*>(map.data), map.size)
       : false;
 
-  if (packet_count == 1 || packet_count % 30 == 0) {
+  if (verboseLoggingEnabled() &&
+      (packet_count == 1 || packet_count % 30 == 0)) {
     gchar* caps_text = caps ? gst_caps_to_string(caps) : nullptr;
     if (map.size >= sizeof(rtc::RtpHeader)) {
       const auto* header = reinterpret_cast<const rtc::RtpHeader*>(map.data);

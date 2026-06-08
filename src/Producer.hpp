@@ -25,6 +25,9 @@ class Producer {
   bool isSignalingServer() const;
   std::string signalingEndpoint() const;
 
+  // Per-output (RTP packets / encoded frames) counters for the stats table.
+  std::vector<VideoPipeline::OutputStat> videoOutputStats() const;
+
  private:
   void setupPeerConnection();
   void setupVideoTracks(VideoPipeline::Profile video_pipeline_profile);
